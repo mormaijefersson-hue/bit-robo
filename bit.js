@@ -2,6 +2,7 @@
    Rosto em canvas + ouvido (Web Speech API) + cérebro (Claude, streaming) + voz (speechSynthesis). */
 (() => {
   'use strict';
+  const BUILD = '2026-10-21.14'; // mesmo valor em version.txt: o app compara pra avisar que tem versão nova
 
   // ---------- Config ----------
   const DEFAULTS = {
@@ -291,6 +292,17 @@
     speakQ.push({ text, expr, id, filler });
     if (!speaking) speakNext();
   }
+  // O que ela disse nos últimos segundos, pra reconhecer o próprio eco no que o ouvido entregou.
+  const said = [];
+  const palavras = (t) => t.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((w) => w.length >= 2);
+  function isEcho(text, at = now()) {
+    const recent = said.filter((x) => at - x.t < 25e3);
+    if (!recent.length || at - lastReplyAt > 9e3) return false;
+    const set = new Set(recent.flatMap((x) => x.words)), w = palavras(text);
+    if (!w.length) return false;
+    const hit = w.filter((x) => set.has(x)).length;
+    return w.length >= 2 ? hit / w.length >= 0.7 : hit === 1 && w[0].length >= 5;
+  }
   function speakNext() {
     const item = speakQ.shift();
     if (!item) {
@@ -300,6 +312,7 @@
     }
     if (item.id !== turnId) return speakNext();
     speaking = true;
+    said.push({ t: now(), words: palavras(item.text) }); while (said.length > 8) said.shift();
     const my = ++uSerial;
     stopListening();
     setState('speaking');
@@ -326,6 +339,7 @@
   function endTurn() {
     exprHold = now() + 1800; // segura a última expressão um pouco
     lastReplyAt = now();
+    vosk.deafUntil = now() + 900; // o som dela ainda "sobra" na sala por um instante depois do fim da fala
     setState('idle');
     lastHeard = now();
     setTimeout(startListening, 250);
@@ -522,7 +536,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     caption(text, 2500);
   }
 
-  const vosk = { ctx: null, rec: null, cloud: false, utt: [], uttMs: 0, voicedMs: 0, muted: true, open: false, quietMs: 0, openMs: 0, floor: 0.002, thr: 0, pre: [], pending: [], status: '', last: '' };
+  const vosk = { deafUntil: 0, ctx: null, rec: null, cloud: false, utt: [], uttMs: 0, voicedMs: 0, muted: true, open: false, quietMs: 0, openMs: 0, floor: 0.002, thr: 0, pre: [], pending: [], status: '', last: '' };
   function loadScript(src) {
     return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
   }
@@ -625,7 +639,8 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     const rms = Math.sqrt(sum / input.length);
     window.__bitLevel = rms;
     vosk.peak = Math.max(rms, (vosk.peak || 0) * 0.93); // pico que decai devagar, pra dar pra ler no medidor
-    if (!(vosk.rec || vosk.cloud) || vosk.muted) { vosk.open = false; vosk.pre.length = 0; vosk.pending = []; vosk.utt = []; vosk.uttMs = vosk.voicedMs = 0; return; }
+    // mudo (ela falando) ou "surdo" logo depois: o resto da voz dela no alto-falante/ambiente não pode virar "fala do usuário"
+    if (!(vosk.rec || vosk.cloud) || vosk.muted || now() < vosk.deafUntil) { vosk.open = false; vosk.quietMs = vosk.openMs = 0; vosk.pre.length = 0; vosk.pending = []; vosk.utt = []; vosk.uttMs = vosk.voicedMs = 0; return; }
     const chunkMs = (input.length / vosk.ctx.sampleRate) * 1000;
     const data = vosk.cloud ? new Float32Array(input) : to16k(input, vosk.ctx.sampleRate); // nuvem guarda no ritmo nativo e reamostra no fim
     if (!vosk.open) vosk.floor = vosk.floor * 0.97 + rms * 0.03; // aprende o ruído do ambiente (ar-condicionado, ventilador)
@@ -660,7 +675,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     meterLvl.style.width = pct(window.__bitLevel || 0) + '%';
     meterLvl.classList.toggle('open', vosk.open);
     meterThr.style.left = pct(vosk.thr || 0.0015) + '%';
-    meterTxt.textContent = `${vosk.status} · nível ${(vosk.peak || 0).toFixed(4)} / limiar ${(vosk.thr || 0.0015).toFixed(4)}${vosk.cloud ? ` · hoje ${stt.n}` : ''}${vosk.muted ? ' · mudo' : ''}${vosk.last ? ' · ' + vosk.last : ''}`;
+    meterTxt.textContent = `v${BUILD.split('.')[1]}${updateAvail ? '↑' : ''} · ${vosk.status} · nível ${(vosk.peak || 0).toFixed(4)} / limiar ${(vosk.thr || 0.0015).toFixed(4)}${vosk.cloud ? ` · hoje ${stt.n}` : ''}${vosk.muted ? ' · mudo' : ''}${vosk.last ? ' · ' + vosk.last : ''}`;
   }, 100);
   function flushHeard() {
     if (vosk.cloud) return flushCloud();
@@ -689,7 +704,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     return new Blob([b], { type: 'audio/wav' });
   }
   // frases que o Whisper inventa em silêncio/ruído (vêm de legenda de vídeo)
-  const WHISPER_FANTASMA = /legenda|amara\.org|obrigad[oa] por assistir|inscreva|se inscrev|até a próxima|tchau,? tchau|^\W*$/i;
+  const WHISPER_FANTASMA = /♪|legenda|amara\.org|obrigad[oa] por assistir|inscreva|se inscrev|até a próxima|tchau,? tchau|^\W*$/i;
   // contador diário (cota grátis da Groq) e pausa de 60 s quando ela reclama de excesso (429)
   const stt = Object.assign({ day: '', n: 0, coolUntil: 0 }, store.get('stt', {}));
   function sttBump() {
@@ -699,7 +714,9 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     if (stt.n === 1800) caption('Já usei 1.800 transcrições hoje: perto do limite grátis da Groq.', 8000);
   }
   // Segmento que o Whisper "inventou": critérios do próprio Whisper (OpenAI) pra descartar trechos sem fala.
-  const segRuim = (g) => (g.no_speech_prob > 0.6 && g.avg_logprob < -1.0) || g.avg_logprob < -1.5 || g.compression_ratio > 2.4;
+  const segRuim = (g) => (g.no_speech_prob > 0.6 && g.avg_logprob < -1.0) || g.avg_logprob < -1.2 || g.compression_ratio > 2.4;
+  // Letras que não existem em português (islandês "ð þ æ", alemão "ä ö", cirílico, CJK…): o Whisper vira "gringo" quando o áudio é ruim.
+  const NAO_PT = /[äöëïñåæøðþßœ]|[^\u0000-\u00FF\u2010-\u2027\u20AC]/i;
   async function transcribe(pcm, info = {}) {
     const myTurn = turnId;
     if (now() < stt.coolUntil) { if (state === 'listening') setState(wasSleeping ? 'sleeping' : 'idle'); return; } // cota esgotada: espera
@@ -727,6 +744,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
         if (bons.length < segs.length) text = bons.map((g) => (g.text || '').trim()).join(' ').trim();
         if (!bons.length) { vosk.last = `✖ ignorado, incerto: "${(j.text || '').trim()}"${stats}`; if (state === 'thinking') setState(wasSleeping ? 'sleeping' : 'idle'); return; }
       }
+      if (NAO_PT.test(text)) { vosk.last = `✖ ignorado, outro idioma: "${text}"${stats}`; if (state === 'thinking') setState(wasSleeping ? 'sleeping' : 'idle'); return; }
       vosk.last = '✔ ' + text + stats;
       if (myTurn !== turnId && state !== 'thinking') return; // algo aconteceu no meio (toque, etc.)
       if (!text || text.length < 2 || WHISPER_FANTASMA.test(text)) { if (state === 'thinking') setState(wasSleeping ? 'sleeping' : 'idle'); return; }
@@ -796,6 +814,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     if (!text || text.length < 2) return;
     // Android às vezes repete o mesmo resultado final
     if (text === lastFinal.text && now() - lastFinal.at < 2000) return;
+    if (isEcho(text)) { vosk.last = '✖ eco (era ela mesma): "' + text + '"'; if (state === 'thinking' && !thinkAbort) setState(wasSleeping ? 'sleeping' : 'idle'); return; }
     lastFinal = { text, at: now() };
     lastHeard = now();
     caption('“' + text + '”', 4000);
@@ -863,6 +882,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     $('cfgRate').value = cfg.rate; $('cfgPitch').value = cfg.pitch; $('cfgSleep').value = cfg.sleepMin;
     $('cfgNosy').checked = cfg.nosy; $('cfgSpont').checked = cfg.spont; $('cfgCaption').checked = cfg.caption; $('cfgEar').value = cfg.ear; $('cfgGroq').value = cfg.groqKey; $('cfgFiller').checked = cfg.filler; $('cfgGain').value = String(cfg.gain); $('cfgMeter').checked = cfg.meter; $('cfgMic').value = cfg.mic; $('cfgFem').value = cfg.fem ? '1' : '0'; $('cfgSwear').value = cfg.swear; $('cfgPolitica').value = cfg.politica;
     $('rateVal').textContent = cfg.rate; $('pitchVal').textContent = cfg.pitch;
+    $('ver').textContent = 'Versão ' + BUILD.split('.')[1] + (updateAvail ? ' — tem uma mais nova!' : '');
     loadVoices(); panel.classList.add('on'); stopListening();
   }
   function readPanel() {
@@ -898,6 +918,25 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     if (document.hidden) { stopListening(); return; }
     keepAwake(); if (state !== 'boot' && !speaking) { if (state !== 'sleeping') setState('idle'); startListening(); }
   });
+
+  // ---------- Versão ----------
+  // O robô fica dias aberto: avisa quando tem versão nova e deixa atualizar sem fechar o Chrome.
+  let updateAvail = false;
+  async function checkUpdate() {
+    try {
+      const t = (await (await fetch('version.txt?' + Date.now(), { cache: 'no-store' })).text()).trim();
+      if (/^\d{4}-/.test(t) && t !== BUILD && !updateAvail) { updateAvail = true; caption('Tem versão nova. Toque no rosto e em "Atualizar o Bit".', 12000); }
+    } catch {}
+  }
+  setInterval(checkUpdate, 5 * 60e3);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) checkUpdate(); });
+  $('cfgUpdate').onclick = async () => {
+    try {
+      for (const r of await navigator.serviceWorker.getRegistrations()) await r.unregister();
+      for (const k of await caches.keys()) if (/^bit-v/.test(k)) await caches.delete(k);
+    } catch {}
+    location.reload();
+  };
 
   // ---------- Início ----------
   $('start').addEventListener('click', async () => {
@@ -935,7 +974,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('sw.js').catch(() => {});
 
   // ganchos pra teste automatizado
-  window.__bit = { setExpr, setState, think, onHeard, goSleep, cfg, vosk, fx, stt, resample16k, to16k, normalizePeak, get state() { return state; }, get history() { return history; } };
+  window.__bit = { setExpr, setState, think, onHeard, goSleep, cfg, vosk, fx, stt, isEcho, NAO_PT, onAudio, said, resample16k, to16k, normalizePeak, get state() { return state; }, get history() { return history; } };
 
   setState('boot'); setExpr('feliz');
   requestAnimationFrame(frame);
