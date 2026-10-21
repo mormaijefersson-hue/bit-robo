@@ -73,6 +73,24 @@
       <small>Fica salva só neste celular. Sem chave, ele roda no "modo sem cérebro" (respostas prontas).</small>
     </label>
     <label>Nome do robô <input id="cfgName" type="text"></label>
+    <label>Gênero
+      <select id="cfgFem"><option value="1">Feminino (ela)</option><option value="0">Masculino (ele)</option></select>
+    </label>
+    <label>Boca suja
+      <select id="cfgSwear">
+        <option value="liberado">Liberado — fala e aguenta palavrão (sem preconceito)</option>
+        <option value="moderado">Moderado — um palavrão leve de vez em quando</option>
+        <option value="nao">Desligado — sem palavrão</option>
+      </select>
+    </label>
+    <label>Política
+      <select id="cfgPolitica">
+        <option value="bolsonarista">Bolsonarista</option>
+        <option value="esquerda">Esquerda</option>
+        <option value="neutra">Neutra (desconversa)</option>
+      </select>
+      <small>Opinião e zoeira, sem inventar fato. Na frente de cliente, fica quieta sobre política.</small>
+    </label>
     <label>Cérebro
       <select id="cfgModel">
         <option value="claude-haiku-5-5">Haiku (mais rápido — recomendado)</option>

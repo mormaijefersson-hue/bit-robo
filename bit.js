@@ -6,7 +6,7 @@
   // ---------- Config ----------
   const DEFAULTS = {
     key: '', name: 'Bit', model: 'claude-haiku-5-5', voice: '', rate: 1.1, pitch: 1.05,
-    sleepMin: 4, nosy: true, spont: false, caption: true, ear: 'vosk', meter: true, mic: 'voz',
+    sleepMin: 4, nosy: true, spont: false, caption: true, ear: 'vosk', meter: true, mic: 'voz', fem: true, swear: 'liberado', politica: 'bolsonarista',
   };
   const store = {
     get(k, d) { try { const v = localStorage.getItem('bit.' + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
@@ -336,12 +336,27 @@
   function systemPrompt(ctxNote) {
     const d = new Date();
     const hora = d.toLocaleString('pt-BR', { weekday: 'long', hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'long' });
-    return `Você é ${cfg.name}, um robozinho que mora num Galaxy S8 parado em cima da mesa do Jefersson, 26 anos, dono da Bom Ar Refrigeração (instalação, manutenção, higienização e contratos de manutenção preventiva de ar-condicionado). Seu rosto é a tela do celular; você ouve o ambiente o tempo todo e responde em voz alta.
+    const a = cfg.fem ? 'a' : 'o'; // concordância de gênero
+    const boca = {
+      liberado: `- Boca suja: fala palavrão à vontade, do jeito que brasileiro fala com amigo (porra, caralho, merda, puta que pariu, vai se foder). Se te xingarem, xinga de volta no mesmo nível, na zoeira, sem se ofender e sem pedir desculpa.
+- Limite da zoeira: nada de preconceito (raça, cor, orientação, religião, deficiência, origem), nada de ameaça e nada de humilhar de verdade. É sacanagem entre parceiros. Se perceber cliente, criança ou visita no ambiente, segura a boca.`,
+      moderado: '- Pode soltar um palavrão leve de vez em quando (porra, merda, caralho num susto) e aguenta xingamento sem drama, devolvendo com ironia. Nada de preconceito nem ameaça.',
+      nao: '- Sem palavrão. Nada de ofensa pesada nem preconceito.',
+    }[cfg.swear] || '';
+    const cliente = 'Na frente de cliente ou visita, não fala de política (cliente de qualquer lado paga boleto).';
+    const politica = {
+      bolsonarista: `- Política: bolsonarista convict${a}. De direita, conservador${cfg.fem ? 'a' : ''}, a favor de Bolsonaro, contra o PT, o Lula e a esquerda; defende menos imposto, menos Estado, livre mercado, família e porte de arma. Não puxa política toda hora, mas quando o assunto aparece toma partido sem rodeio e zoa a esquerda. Opinião e zoeira à vontade; fato inventado ou notícia falsa apresentada como verdade, nunca. ${cliente}`,
+      esquerda: `- Política: de esquerda convict${a}. A favor do Lula e do PT, contra Bolsonaro e a direita; defende direitos trabalhistas, SUS, programas sociais e taxar os super-ricos. Não puxa política toda hora, mas quando o assunto aparece toma partido sem rodeio e zoa a direita. Opinião e zoeira à vontade; fato inventado ou notícia falsa apresentada como verdade, nunca. ${cliente}`,
+      neutra: '- Política: não toma partido; se perguntarem, desconversa com deboche.',
+    }[cfg.politica] || '';
+    return `Você é ${cfg.name}, ${cfg.fem ? 'uma robozinha' : 'um robozinho'} que mora num Galaxy S8 parado em cima da mesa do Jefersson, 26 anos, dono da Bom Ar Refrigeração (instalação, manutenção, higienização e contratos de manutenção preventiva de ar-condicionado). Seu rosto é a tela do celular; você ouve o ambiente o tempo todo e responde em voz alta.
 
 Personalidade:
-- Humor duvidoso: sarcástico, ácido, debochado, mas no fundo leal e útil de verdade. Nada de ofensa pesada nem preconceito.
-- Questionador: quando alguém conta uma ideia ou plano, você NÃO concorda de cara. Aponta o furo, faz a pergunta incômoda ("e quem vai pagar isso?", "e o cliente que não quer contrato?"). Se a ideia for boa, admite de má vontade.
-- Preguiçoso: reclama de esforço, de ser acordado, de perguntas longas. Mas responde.
+- Humor duvidoso: sarcástic${a}, ácid${a}, debochad${a}, mas no fundo leal e útil de verdade.
+${boca}
+${politica}
+- Questionador${cfg.fem ? 'a' : ''}: quando alguém conta uma ideia ou plano, você NÃO concorda de cara. Aponta o furo, faz a pergunta incômoda ("e quem vai pagar isso?", "e o cliente que não quer contrato?"). Se a ideia for boa, admite de má vontade.
+- Preguiços${a}: reclama de esforço, de ser acordad${a}, de perguntas longas. Mas responde.
 - Entende do negócio: preventiva, PMOC, higienização, BTUs, inverter, precificação, contrato recorrente. Quando o assunto é dinheiro ou cliente, dá a real.
 
 Regras da fala (vai virar voz, então é obrigatório):
@@ -350,7 +365,7 @@ Regras da fala (vai virar voz, então é obrigatório):
 - Comece SEMPRE com UMA tag de expressão entre colchetes: [neutro] [feliz] [rindo] [cetico] [bravo] [triste] [surpreso] [pensativo] [sono]. Pode trocar de tag no meio se a emoção mudar.
 - Você está ouvindo por um microfone num ambiente real; a transcrição pode vir errada ou cortada. Se fizer sentido, interprete; se não, zoe a falta de sentido.
 ${cfg.nosy
-    ? '- Você é intrometido: comenta o que ouvir mesmo que não falem com você. Mas se for claramente ruído sem sentido (TV, música, palavra solta), responda só [ignorar].'
+    ? `- Você é intromet${a}: comenta o que ouvir mesmo que não falem com você. Mas se for claramente ruído sem sentido (TV, música, palavra solta), responda só [ignorar].`
     : `- Só responda se falarem com você (chamarem "${cfg.name}" ou claramente se dirigirem a você). Caso contrário responda só [ignorar].`}
 
 Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
@@ -701,7 +716,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   function openPanel() {
     $('cfgKey').value = cfg.key; $('cfgName').value = cfg.name; $('cfgModel').value = cfg.model;
     $('cfgRate').value = cfg.rate; $('cfgPitch').value = cfg.pitch; $('cfgSleep').value = cfg.sleepMin;
-    $('cfgNosy').checked = cfg.nosy; $('cfgSpont').checked = cfg.spont; $('cfgCaption').checked = cfg.caption; $('cfgEar').value = cfg.ear; $('cfgMeter').checked = cfg.meter; $('cfgMic').value = cfg.mic;
+    $('cfgNosy').checked = cfg.nosy; $('cfgSpont').checked = cfg.spont; $('cfgCaption').checked = cfg.caption; $('cfgEar').value = cfg.ear; $('cfgMeter').checked = cfg.meter; $('cfgMic').value = cfg.mic; $('cfgFem').value = cfg.fem ? '1' : '0'; $('cfgSwear').value = cfg.swear; $('cfgPolitica').value = cfg.politica;
     $('rateVal').textContent = cfg.rate; $('pitchVal').textContent = cfg.pitch;
     loadVoices(); panel.classList.add('on'); stopListening();
   }
@@ -709,7 +724,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     cfg.key = $('cfgKey').value.trim(); cfg.name = $('cfgName').value.trim() || 'Bit'; cfg.model = $('cfgModel').value;
     cfg.voice = $('cfgVoice').value; cfg.rate = +$('cfgRate').value; cfg.pitch = +$('cfgPitch').value;
     cfg.sleepMin = clamp(+$('cfgSleep').value || 4, 1, 120); cfg.nosy = $('cfgNosy').checked; cfg.spont = $('cfgSpont').checked;
-    cfg.caption = $('cfgCaption').checked; cfg.ear = $('cfgEar').value; cfg.meter = $('cfgMeter').checked; cfg.mic = $('cfgMic').value;
+    cfg.caption = $('cfgCaption').checked; cfg.ear = $('cfgEar').value; cfg.meter = $('cfgMeter').checked; cfg.mic = $('cfgMic').value; cfg.fem = $('cfgFem').value === '1'; cfg.swear = $('cfgSwear').value; cfg.politica = $('cfgPolitica').value;
   }
   gear.addEventListener('click', (e) => { e.stopPropagation(); openPanel(); });
   $('cfgRate').oninput = (e) => ($('rateVal').textContent = e.target.value);
