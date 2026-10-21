@@ -30,7 +30,7 @@
     background: rgba(10,20,25,.8); color: var(--glow); font-size: 22px; z-index: 4; opacity: 0; pointer-events: none; transition: opacity .3s; }
   #gear.on { opacity: 1; pointer-events: auto; }
 
-  #meter { position: fixed; left: 12px; bottom: 10px; z-index: 3; font-size: 11px; color: var(--mut); display: none; pointer-events: none; }
+  #meter { white-space: pre-line; max-width: 94vw; position: fixed; left: 12px; bottom: 10px; z-index: 3; font-size: 11px; color: var(--mut); display: none; pointer-events: none; }
   #meter.on { display: block; }
   #meter .bar { position: relative; width: 160px; height: 8px; border: 1px solid #1c3a44; border-radius: 4px; overflow: hidden; margin-bottom: 4px; }
   #meter .lvl { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: #2a7f8f; }
@@ -118,9 +118,16 @@
       </select>
       <small>Se a barra do medidor não passa do risco vermelho quando você fala normal, suba aqui. Quem precisa gritar deve começar pelo 4x.</small>
     </label>
+    <label>Modelo de transcrição (Groq)
+      <select id="cfgStt">
+        <option value="whisper-large-v3">Whisper completo — mais preciso (recomendado)</option>
+        <option value="whisper-large-v3-turbo">Whisper turbo — um pouco mais rápido</option>
+      </select>
+    </label>
     <label>Microfone
       <select id="cfgMic">
-        <option value="voz">Voz (processado pelo Android — recomendado)</option>
+        <option value="voz">Voz (tudo ligado — padrão)</option>
+        <option value="ganho">Ganho e eco, sem redução de ruído (teste se ela te entende pior falando rápido)</option>
         <option value="bruto">Bruto (sem processamento; no S8 fica quase surdo)</option>
       </select>
     </label>

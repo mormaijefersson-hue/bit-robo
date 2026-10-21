@@ -1,7 +1,7 @@
 // Cache: abre mesmo com Wi-Fi instável. Arquivos do app: tenta a versão nova primeiro.
 // Ouvido offline (biblioteca + modelo, ~36 MB): cache separado, não some quando o app atualiza.
-const CACHE = 'bit-v14', BIGCACHE = 'bit-big';
-const FILES = ['./', 'index.html', 'bit.js', 'manifest.json', 'icon-192.png', 'icon-512.png'];
+const CACHE = 'bit-v15', BIGCACHE = 'bit-big';
+const FILES = ['./', 'index.html', 'bit.js', 'manifest.json', 'icon-192.png', 'icon-512.png', 'mic-worklet.js'];
 const BIG = /\/(vosk\.js|vosk-pt\.tar\.gz)$/;
 self.addEventListener('install', (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES))); self.skipWaiting(); });
 self.addEventListener('activate', (e) => {

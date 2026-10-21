@@ -2,12 +2,12 @@
    Rosto em canvas + ouvido (Web Speech API) + cérebro (Claude, streaming) + voz (speechSynthesis). */
 (() => {
   'use strict';
-  const BUILD = '2026-10-21.14'; // mesmo valor em version.txt: o app compara pra avisar que tem versão nova
+  const BUILD = '2026-10-21.15'; // mesmo valor em version.txt: o app compara pra avisar que tem versão nova
 
   // ---------- Config ----------
   const DEFAULTS = {
     key: '', name: 'Bit', model: 'claude-haiku-5-5', voice: '', rate: 1.1, pitch: 1.05,
-    sleepMin: 4, nosy: true, spont: false, caption: true, ear: 'nuvem', groqKey: '', filler: true, gain: 1, meter: true, mic: 'voz', fem: true, swear: 'liberado', politica: 'bolsonarista',
+    sleepMin: 4, nosy: true, spont: false, caption: true, ear: 'nuvem', groqKey: '', filler: true, gain: 1, sttModel: 'whisper-large-v3', meter: true, mic: 'voz', fem: true, swear: 'liberado', politica: 'bolsonarista',
   };
   const store = {
     get(k, d) { try { const v = localStorage.getItem('bit.' + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
@@ -536,7 +536,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     caption(text, 2500);
   }
 
-  const vosk = { deafUntil: 0, ctx: null, rec: null, cloud: false, utt: [], uttMs: 0, voicedMs: 0, muted: true, open: false, quietMs: 0, openMs: 0, floor: 0.002, thr: 0, pre: [], pending: [], status: '', last: '' };
+  const vosk = { log: [], tap: '', deafUntil: 0, ctx: null, rec: null, cloud: false, utt: [], uttMs: 0, voicedMs: 0, muted: true, open: false, quietMs: 0, openMs: 0, floor: 0.002, thr: 0, pre: [], pending: [], status: '', last: '' };
   function loadScript(src) {
     return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
   }
@@ -596,17 +596,30 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   }
   async function initMic(ctx) {
     vosk.ctx = ctx;
-    // 'voz': processamento de voz do Android (ganho, ruído, eco). 'bruto': sem processamento — no S8 chega quase mudo.
-    const proc = cfg.mic !== 'bruto';
+    // 'voz': tudo ligado (ganho, redução de ruído, eco). 'ganho': ganho e eco, SEM redução de ruído (que pode comer o fim das
+    // palavras na fala corrida). 'bruto': nada — no S8 chega quase mudo.
+    const m = cfg.mic;
     const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: proc, noiseSuppression: proc, autoGainControl: proc, channelCount: 1 },
+      audio: { echoCancellation: m !== 'bruto', noiseSuppression: m === 'voz', autoGainControl: m !== 'bruto', channelCount: 1 },
     });
     const src = ctx.createMediaStreamSource(stream);
+    vosk.stream = stream;
+    // AudioWorklet roda na thread de áudio: não perde pedaços quando a animação do rosto ocupa a thread principal.
+    // Ligado na saída (em silêncio) pra o grafo rodar e pros botões de volume controlarem a mídia.
+    if (ctx.audioWorklet && window.AudioWorkletNode) {
+      try {
+        await ctx.audioWorklet.addModule('mic-worklet.js');
+        const node = new AudioWorkletNode(ctx, 'mic-tap', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
+        node.port.onmessage = (e) => onAudio(e.data);
+        src.connect(node); node.connect(ctx.destination);
+        vosk.node = node; vosk.tap = 'worklet';
+        return;
+      } catch (err) { console.warn('[bit] AudioWorklet indisponível, usando ScriptProcessor', err); }
+    }
     const node = ctx.createScriptProcessor(2048, 1, 1);
-    // ligado na saída (em silêncio): o processador só roda assim, e os botões de volume passam a controlar a mídia
     src.connect(node); node.connect(ctx.destination);
     node.onaudioprocess = (e) => { e.outputBuffer.getChannelData(0).fill(0); onAudio(e.inputBuffer.getChannelData(0)); };
-    vosk.node = node; vosk.stream = stream;
+    vosk.node = node; vosk.tap = 'script';
   }
   // Ouvido na nuvem: a frase inteira vai pro Whisper da Groq (cota grátis). Sem bipe, entende fala real.
   function initCloud() { vosk.cloud = true; vosk.status = 'nuvem (Whisper) pronto'; }
@@ -675,7 +688,8 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     meterLvl.style.width = pct(window.__bitLevel || 0) + '%';
     meterLvl.classList.toggle('open', vosk.open);
     meterThr.style.left = pct(vosk.thr || 0.0015) + '%';
-    meterTxt.textContent = `v${BUILD.split('.')[1]}${updateAvail ? '↑' : ''} · ${vosk.status} · nível ${(vosk.peak || 0).toFixed(4)} / limiar ${(vosk.thr || 0.0015).toFixed(4)}${vosk.cloud ? ` · hoje ${stt.n}` : ''}${vosk.muted ? ' · mudo' : ''}${vosk.last ? ' · ' + vosk.last : ''}`;
+    meterTxt.textContent = `v${BUILD.split('.')[1]}${updateAvail ? '↑' : ''} · ${vosk.status}${vosk.tap === 'worklet' ? ' · wk' : vosk.tap ? ' · sp' : ''} · nível ${(vosk.peak || 0).toFixed(4)} / limiar ${(vosk.thr || 0.0015).toFixed(4)}${vosk.cloud ? ` · hoje ${stt.n}` : ''}${vosk.muted ? ' · mudo' : ''}`
+      + (vosk.log.length ? '\n' + vosk.log.join('\n') : (vosk.last ? '\n' + vosk.last : ''));
   }, 100);
   function flushHeard() {
     if (vosk.cloud) return flushCloud();
@@ -687,7 +701,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   function flushCloud() {
     if (!vosk.utt.length || vosk.muted || vosk.open || now() - (window.__lastVoiceAt || 0) < 900) return;
     const parts = vosk.utt, voiced = vosk.voicedMs; vosk.utt = []; vosk.uttMs = vosk.voicedMs = 0;
-    if (voiced < 500) { if (state === 'listening') setState(wasSleeping ? 'sleeping' : 'idle'); return; } // estalo/barulho curto
+    if (voiced < 500) { anota(`⌀ curto demais: só ${(voiced / 1000).toFixed(1)} s de voz`); if (state === 'listening') setState(wasSleeping ? 'sleeping' : 'idle'); return; } // estalo/barulho curto
     const n = parts.reduce((t, p) => t + p.length, 0), pcm = new Float32Array(n);
     let o = 0; for (const p of parts) { pcm.set(p, o); o += p.length; }
     const x16 = resample16k(pcm, vosk.ctx.sampleRate);
@@ -713,39 +727,46 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     stt.n++; store.set('stt', { day: stt.day, n: stt.n });
     if (stt.n === 1800) caption('Já usei 1.800 transcrições hoje: perto do limite grátis da Groq.', 8000);
   }
+  // Histórico curto das últimas falas (aparece no medidor): mostra em que etapa cada fala morreu ou deu certo.
+  function anota(msg) { vosk.last = msg; vosk.log.unshift(msg); if (vosk.log.length > 4) vosk.log.length = 4; }
   // Segmento que o Whisper "inventou": critérios do próprio Whisper (OpenAI) pra descartar trechos sem fala.
-  const segRuim = (g) => (g.no_speech_prob > 0.6 && g.avg_logprob < -1.0) || g.avg_logprob < -1.2 || g.compression_ratio > 2.4;
+  const segRuim = (g) => (g.no_speech_prob > 0.6 && g.avg_logprob < -1.0) || g.avg_logprob < -1.5 || g.compression_ratio > 2.4;
   // Letras que não existem em português (islandês "ð þ æ", alemão "ä ö", cirílico, CJK…): o Whisper vira "gringo" quando o áudio é ruim.
   const NAO_PT = /[äöëïñåæøðþßœ]|[^\u0000-\u00FF\u2010-\u2027\u20AC]/i;
   async function transcribe(pcm, info = {}) {
     const myTurn = turnId;
-    if (now() < stt.coolUntil) { if (state === 'listening') setState(wasSleeping ? 'sleeping' : 'idle'); return; } // cota esgotada: espera
+    if (now() < stt.coolUntil) { anota('⏸ pausa da cota grátis (1 min)'); if (state === 'listening') setState(wasSleeping ? 'sleeping' : 'idle'); return; } // cota esgotada: espera
     sttBump();
     if (state === 'listening' || state === 'idle') setState('thinking');
-    const fd = new FormData();
     const wav = wav16k(pcm); vosk.lastWav = wav; // guardada pra "ouvir o que o microfone captou" (engrenagem)
-    const stats = info.secs ? ` (${info.secs.toFixed(1)} s, pico ${info.peak.toFixed(3)})` : '';
-    fd.append('file', wav, 'fala.wav');
-    fd.append('model', 'whisper-large-v3-turbo');
-    fd.append('language', 'pt');
-    fd.append('temperature', '0');
-    fd.append('response_format', 'verbose_json'); // traz a confiança de cada trecho
-    fd.append('prompt', `Conversa em português do Brasil com ${cfg.name}, robô da Bom Ar Refrigeração: ar-condicionado, preventiva, PMOC, higienização, inverter, BTUs.`);
+    let stats = info.secs ? ` (${info.secs.toFixed(1)} s, pico ${info.peak.toFixed(3)})` : '';
+    const post = (model) => {
+      const fd = new FormData();
+      fd.append('file', wav, 'fala.wav');
+      fd.append('model', model);
+      fd.append('language', 'pt');
+      fd.append('temperature', '0');
+      fd.append('response_format', 'verbose_json'); // traz a confiança de cada trecho
+      fd.append('prompt', `Conversa em português do Brasil com ${cfg.name}, robô da Bom Ar Refrigeração: ar-condicionado, preventiva, PMOC, higienização, inverter, BTUs.`);
+      return fetch('https://api.groq.com/openai/v1/audio/transcriptions', { method: 'POST', headers: { Authorization: 'Bearer ' + cfg.groqKey }, body: fd });
+    };
     try {
-      const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-        method: 'POST', headers: { Authorization: 'Bearer ' + cfg.groqKey }, body: fd,
-      });
+      let res = await post(cfg.sttModel);
+      // o modelo completo pode não existir mais na cota grátis: cai pro turbo, que é rápido e sempre esteve lá
+      if ((res.status === 400 || res.status === 404) && cfg.sttModel !== 'whisper-large-v3-turbo') { res = await post('whisper-large-v3-turbo'); stats += ' [turbo]'; }
       if (!res.ok) throw Object.assign(new Error('HTTP ' + res.status), { status: res.status });
       const j = await res.json();
       let text = (j.text || '').trim();
       const segs = Array.isArray(j.segments) ? j.segments : [];
+      const lp = segs.map((g) => g.avg_logprob).filter((v) => typeof v === 'number');
+      if (lp.length) stats = stats.replace(/\)/, `, conf ${(lp.reduce((a, b) => a + b, 0) / lp.length).toFixed(2)})`);
       if (segs.length) { // descarta os trechos de baixa confiança (o Whisper inventa frases em ruído/áudio ruim)
         const bons = segs.filter((g) => !segRuim(g));
         if (bons.length < segs.length) text = bons.map((g) => (g.text || '').trim()).join(' ').trim();
-        if (!bons.length) { vosk.last = `✖ ignorado, incerto: "${(j.text || '').trim()}"${stats}`; if (state === 'thinking') setState(wasSleeping ? 'sleeping' : 'idle'); return; }
+        if (!bons.length) { anota(`✖ incerto: "${(j.text || '').trim()}"${stats}`); if (state === 'thinking') setState(wasSleeping ? 'sleeping' : 'idle'); return; }
       }
-      if (NAO_PT.test(text)) { vosk.last = `✖ ignorado, outro idioma: "${text}"${stats}`; if (state === 'thinking') setState(wasSleeping ? 'sleeping' : 'idle'); return; }
-      vosk.last = '✔ ' + text + stats;
+      if (NAO_PT.test(text)) { anota(`✖ outro idioma: "${text}"${stats}`); if (state === 'thinking') setState(wasSleeping ? 'sleeping' : 'idle'); return; }
+      anota('✔ ' + text + stats);
       if (myTurn !== turnId && state !== 'thinking') return; // algo aconteceu no meio (toque, etc.)
       if (!text || text.length < 2 || WHISPER_FANTASMA.test(text)) { if (state === 'thinking') setState(wasSleeping ? 'sleeping' : 'idle'); return; }
       onHeard(text);
@@ -814,7 +835,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     if (!text || text.length < 2) return;
     // Android às vezes repete o mesmo resultado final
     if (text === lastFinal.text && now() - lastFinal.at < 2000) return;
-    if (isEcho(text)) { vosk.last = '✖ eco (era ela mesma): "' + text + '"'; if (state === 'thinking' && !thinkAbort) setState(wasSleeping ? 'sleeping' : 'idle'); return; }
+    if (isEcho(text)) { anota('✖ eco (era ela): "' + text + '"'); if (state === 'thinking' && !thinkAbort) setState(wasSleeping ? 'sleeping' : 'idle'); return; }
     lastFinal = { text, at: now() };
     lastHeard = now();
     caption('“' + text + '”', 4000);
@@ -880,7 +901,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   function openPanel() {
     $('cfgKey').value = cfg.key; $('cfgName').value = cfg.name; $('cfgModel').value = cfg.model;
     $('cfgRate').value = cfg.rate; $('cfgPitch').value = cfg.pitch; $('cfgSleep').value = cfg.sleepMin;
-    $('cfgNosy').checked = cfg.nosy; $('cfgSpont').checked = cfg.spont; $('cfgCaption').checked = cfg.caption; $('cfgEar').value = cfg.ear; $('cfgGroq').value = cfg.groqKey; $('cfgFiller').checked = cfg.filler; $('cfgGain').value = String(cfg.gain); $('cfgMeter').checked = cfg.meter; $('cfgMic').value = cfg.mic; $('cfgFem').value = cfg.fem ? '1' : '0'; $('cfgSwear').value = cfg.swear; $('cfgPolitica').value = cfg.politica;
+    $('cfgNosy').checked = cfg.nosy; $('cfgSpont').checked = cfg.spont; $('cfgCaption').checked = cfg.caption; $('cfgEar').value = cfg.ear; $('cfgGroq').value = cfg.groqKey; $('cfgFiller').checked = cfg.filler; $('cfgGain').value = String(cfg.gain); $('cfgStt').value = cfg.sttModel; $('cfgMeter').checked = cfg.meter; $('cfgMic').value = cfg.mic; $('cfgFem').value = cfg.fem ? '1' : '0'; $('cfgSwear').value = cfg.swear; $('cfgPolitica').value = cfg.politica;
     $('rateVal').textContent = cfg.rate; $('pitchVal').textContent = cfg.pitch;
     $('ver').textContent = 'Versão ' + BUILD.split('.')[1] + (updateAvail ? ' — tem uma mais nova!' : '');
     loadVoices(); panel.classList.add('on'); stopListening();
@@ -889,7 +910,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     cfg.key = $('cfgKey').value.trim(); cfg.name = $('cfgName').value.trim() || 'Bit'; cfg.model = $('cfgModel').value;
     cfg.voice = $('cfgVoice').value; cfg.rate = +$('cfgRate').value; cfg.pitch = +$('cfgPitch').value;
     cfg.sleepMin = clamp(+$('cfgSleep').value || 4, 1, 120); cfg.nosy = $('cfgNosy').checked; cfg.spont = $('cfgSpont').checked;
-    cfg.caption = $('cfgCaption').checked; cfg.ear = $('cfgEar').value; cfg.groqKey = $('cfgGroq').value.trim(); cfg.filler = $('cfgFiller').checked; cfg.gain = +$('cfgGain').value || 1; cfg.meter = $('cfgMeter').checked; cfg.mic = $('cfgMic').value; cfg.fem = $('cfgFem').value === '1'; cfg.swear = $('cfgSwear').value; cfg.politica = $('cfgPolitica').value;
+    cfg.caption = $('cfgCaption').checked; cfg.ear = $('cfgEar').value; cfg.groqKey = $('cfgGroq').value.trim(); cfg.filler = $('cfgFiller').checked; cfg.gain = +$('cfgGain').value || 1; cfg.sttModel = $('cfgStt').value; cfg.meter = $('cfgMeter').checked; cfg.mic = $('cfgMic').value; cfg.fem = $('cfgFem').value === '1'; cfg.swear = $('cfgSwear').value; cfg.politica = $('cfgPolitica').value;
   }
   gear.addEventListener('click', (e) => { e.stopPropagation(); openPanel(); });
   $('cfgRate').oninput = (e) => ($('rateVal').textContent = e.target.value);
@@ -974,7 +995,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('sw.js').catch(() => {});
 
   // ganchos pra teste automatizado
-  window.__bit = { setExpr, setState, think, onHeard, goSleep, cfg, vosk, fx, stt, isEcho, NAO_PT, onAudio, said, resample16k, to16k, normalizePeak, get state() { return state; }, get history() { return history; } };
+  window.__bit = { setExpr, setState, think, onHeard, goSleep, cfg, vosk, fx, stt, isEcho, NAO_PT, onAudio, said, anota, resample16k, to16k, normalizePeak, get state() { return state; }, get history() { return history; } };
 
   setState('boot'); setExpr('feliz');
   requestAnimationFrame(frame);
