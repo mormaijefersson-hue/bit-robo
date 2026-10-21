@@ -18,7 +18,7 @@ jobs:
           n=1
           while IFS= read -r frase; do
             gtts-cli --lang pt --tld com.br "$frase" --output f$n.mp3
-            ffmpeg -loglevel error -i f$n.mp3 -ar 48000 -ac 1 -sample_fmt s16 f$n.wav && rm f$n.mp3
+            ffmpeg -nostdin -loglevel error -i f$n.mp3 -ar 48000 -ac 1 -sample_fmt s16 f$n.wav && rm f$n.mp3
             echo "f$n.wav|$frase" >> frases.txt
             n=$((n+1))
           done <<'FRASES'
