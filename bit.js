@@ -6,7 +6,7 @@
   // ---------- Config ----------
   const DEFAULTS = {
     key: '', name: 'Bit', model: 'claude-haiku-5-5', voice: '', rate: 1.1, pitch: 1.05,
-    sleepMin: 4, nosy: true, spont: false, caption: true, ear: 'vosk', meter: true, mic: 'voz', fem: true, swear: 'liberado', politica: 'bolsonarista',
+    sleepMin: 4, nosy: true, spont: false, caption: true, ear: 'nuvem', groqKey: '', meter: true, mic: 'voz', fem: true, swear: 'liberado', politica: 'bolsonarista',
   };
   const store = {
     get(k, d) { try { const v = localStorage.getItem('bit.' + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
@@ -503,7 +503,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     caption(text, 2500);
   }
 
-  const vosk = { ctx: null, rec: null, muted: true, open: false, quietMs: 0, openMs: 0, floor: 0.002, thr: 0, pre: [], pending: [], status: '', last: '' };
+  const vosk = { ctx: null, rec: null, cloud: false, utt: [], uttMs: 0, voicedMs: 0, muted: true, open: false, quietMs: 0, openMs: 0, floor: 0.002, thr: 0, pre: [], pending: [], status: '', last: '' };
   function loadScript(src) {
     return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
   }
@@ -523,7 +523,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     rsRest = buf.slice(Math.floor(n * ratio));
     return out;
   }
-  async function initVosk(ctx) {
+  async function initMic(ctx) {
     vosk.ctx = ctx;
     // 'voz': processamento de voz do Android (ganho, ruído, eco). 'bruto': sem processamento — no S8 chega quase mudo.
     const proc = cfg.mic !== 'bruto';
@@ -535,7 +535,12 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     // ligado na saída (em silêncio): o processador só roda assim, e os botões de volume passam a controlar a mídia
     src.connect(node); node.connect(ctx.destination);
     node.onaudioprocess = (e) => { e.outputBuffer.getChannelData(0).fill(0); onAudio(e.inputBuffer.getChannelData(0)); };
-    vosk.node = node; vosk.stream = stream; vosk.status = 'baixando/abrindo modelo…';
+    vosk.node = node; vosk.stream = stream;
+  }
+  // Ouvido na nuvem: a frase inteira vai pro Whisper da Groq (cota grátis). Sem bipe, entende fala real.
+  function initCloud() { vosk.cloud = true; vosk.status = 'nuvem (Whisper) pronto'; }
+  async function initVosk() {
+    vosk.status = 'baixando/abrindo modelo…';
     statusEl.textContent = 'carregando o ouvido…';
     await loadScript('vosk.js');
     const model = await window.Vosk.createModel(new URL('vosk-pt.tar.gz', location.href).href, -1);
@@ -561,7 +566,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     const rms = Math.sqrt(sum / input.length);
     window.__bitLevel = rms;
     vosk.peak = Math.max(rms, (vosk.peak || 0) * 0.93); // pico que decai devagar, pra dar pra ler no medidor
-    if (!vosk.rec || vosk.muted) { vosk.open = false; vosk.pre.length = 0; vosk.pending = []; return; }
+    if (!(vosk.rec || vosk.cloud) || vosk.muted) { vosk.open = false; vosk.pre.length = 0; vosk.pending = []; vosk.utt = []; vosk.uttMs = vosk.voicedMs = 0; return; }
     const chunkMs = (input.length / vosk.ctx.sampleRate) * 1000;
     const data = to16k(input, vosk.ctx.sampleRate);
     if (!vosk.open) vosk.floor = vosk.floor * 0.97 + rms * 0.03; // aprende o ruído do ambiente (ar-condicionado, ventilador)
@@ -571,15 +576,15 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     // (palavras fracas no meio da frase não fecham), mas acima do ruído de fundo (não fica preso aberto)
     const closeLvl = Math.max(vosk.floor * 1.6, thr * 0.5);
     if (rms > (vosk.open ? closeLvl : thr)) {
-      if (!vosk.open) { vosk.open = true; for (const p of vosk.pre) feed(p); vosk.pre.length = 0; }
-      vosk.quietMs = 0; window.__lastVoiceAt = now();
+      if (!vosk.open) { vosk.open = true; for (const p of vosk.pre) feed(p); vosk.pre.length = 0; if (vosk.cloud) heardInterim('…'); }
+      vosk.quietMs = 0; window.__lastVoiceAt = now(); vosk.voicedMs += chunkMs;
     } else if (vosk.open) vosk.quietMs += chunkMs;
     if (vosk.open) {
       feed(data); vosk.openMs += chunkMs;
       // 0,75 s de silêncio = acabou o trecho; 20 s aberto direto = barulho contínuo, fecha e reaprende o fundo
       if (vosk.quietMs > 750 || vosk.openMs > 20000) {
         if (vosk.openMs > 20000) vosk.floor = rms;
-        vosk.open = false; vosk.openMs = 0; vosk.rec.retrieveFinalResult();
+        vosk.open = false; vosk.openMs = 0; vosk.rec?.retrieveFinalResult();
       }
     } else {
       vosk.pre.push(data); // 0,6 s antes da fala, pra não comer o começo
@@ -599,11 +604,62 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     meterTxt.textContent = `${vosk.status} · nível ${(vosk.peak || 0).toFixed(4)} / limiar ${(vosk.thr || 0.0015).toFixed(4)}${vosk.muted ? ' · mudo' : ''}${vosk.last ? ' · ' + vosk.last : ''}`;
   }, 100);
   function flushHeard() {
+    if (vosk.cloud) return flushCloud();
     if (!vosk.pending.length || vosk.muted || now() - (window.__lastVoiceAt || 0) < 900) return;
     const text = vosk.pending.join(' '); vosk.pending = [];
     onHeard(text);
   }
-  function feed(data) { try { vosk.rec.acceptWaveformFloat(data, 16000); } catch (e) { vosk.status = 'erro ao processar: ' + e.message; } }
+  // Nuvem: guarda a frase (até 30 s) e manda quando a pessoa fica 0,9 s em silêncio.
+  function flushCloud() {
+    if (!vosk.utt.length || vosk.muted || vosk.open || now() - (window.__lastVoiceAt || 0) < 900) return;
+    const parts = vosk.utt, voiced = vosk.voicedMs; vosk.utt = []; vosk.uttMs = vosk.voicedMs = 0;
+    if (voiced < 300) { if (state === 'listening') setState(wasSleeping ? 'sleeping' : 'idle'); return; } // estalo/barulho curto
+    const n = parts.reduce((t, p) => t + p.length, 0), pcm = new Float32Array(n);
+    let o = 0; for (const p of parts) { pcm.set(p, o); o += p.length; }
+    transcribe(pcm);
+  }
+  function wav16k(pcm) {
+    const b = new ArrayBuffer(44 + pcm.length * 2), v = new DataView(b);
+    const str = (off, t) => { for (let i = 0; i < t.length; i++) v.setUint8(off + i, t.charCodeAt(i)); };
+    str(0, 'RIFF'); v.setUint32(4, 36 + pcm.length * 2, true); str(8, 'WAVEfmt '); v.setUint32(16, 16, true);
+    v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, 16000, true); v.setUint32(28, 32000, true);
+    v.setUint16(32, 2, true); v.setUint16(34, 16, true); str(36, 'data'); v.setUint32(40, pcm.length * 2, true);
+    for (let i = 0; i < pcm.length; i++) v.setInt16(44 + i * 2, clamp(pcm[i], -1, 1) * 0x7fff, true);
+    return new Blob([b], { type: 'audio/wav' });
+  }
+  // frases que o Whisper inventa em silêncio/ruído (vêm de legenda de vídeo)
+  const WHISPER_FANTASMA = /legenda|amara\.org|obrigad[oa] por assistir|inscreva|se inscrev|até a próxima|tchau,? tchau|^\W*$/i;
+  async function transcribe(pcm) {
+    const myTurn = turnId;
+    if (state === 'listening' || state === 'idle') setState('thinking');
+    const fd = new FormData();
+    fd.append('file', wav16k(pcm), 'fala.wav');
+    fd.append('model', 'whisper-large-v3-turbo');
+    fd.append('language', 'pt');
+    fd.append('temperature', '0');
+    fd.append('response_format', 'json');
+    fd.append('prompt', `Conversa em português do Brasil com ${cfg.name}, robô da Bom Ar Refrigeração: ar-condicionado, preventiva, PMOC, higienização, inverter, BTUs.`);
+    try {
+      const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+        method: 'POST', headers: { Authorization: 'Bearer ' + cfg.groqKey }, body: fd,
+      });
+      if (!res.ok) throw Object.assign(new Error('HTTP ' + res.status), { status: res.status });
+      const text = ((await res.json()).text || '').trim();
+      vosk.last = '✔ ' + text;
+      if (myTurn !== turnId && state !== 'thinking') return; // algo aconteceu no meio (toque, etc.)
+      if (!text || text.length < 2 || WHISPER_FANTASMA.test(text)) { if (state === 'thinking') setState(wasSleeping ? 'sleeping' : 'idle'); return; }
+      onHeard(text);
+    } catch (err) {
+      console.warn('[bit] transcrição falhou', err);
+      if (state === 'thinking') setState('idle');
+      if (err.status === 401) say('A chave da Groq tá errada. Arruma na engrenagem.', 'bravo');
+      else if (err.status === 429) caption('Cota grátis da Groq esgotou por agora. Tenta daqui a pouco.', 6000);
+      else caption('Não consegui transcrever (sem internet?).', 4000);
+    }
+  }
+  function feed(data) {
+    if (vosk.cloud) { if (vosk.uttMs < 30000) { vosk.utt.push(data); vosk.uttMs += data.length / 16; } return; }
+    try { vosk.rec.acceptWaveformFloat(data, 16000); } catch (e) { vosk.status = 'erro ao processar: ' + e.message; } }
 
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   let rec = null, wantListen = false, recRunning = false, recBackoff = 300;
@@ -643,7 +699,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     if (vosk.ctx) {
       // não escuta a própria voz; descarta o que estava no meio
       if (!vosk.muted && vosk.rec && vosk.open) { vosk.muted = true; vosk.rec.retrieveFinalResult(); }
-      vosk.muted = true; vosk.open = false; return;
+      vosk.muted = true; vosk.open = false; vosk.utt = []; vosk.uttMs = vosk.voicedMs = 0; return;
     }
     wantListen = false;
     if (rec && recRunning) { try { rec.abort(); } catch {} }
@@ -716,7 +772,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   function openPanel() {
     $('cfgKey').value = cfg.key; $('cfgName').value = cfg.name; $('cfgModel').value = cfg.model;
     $('cfgRate').value = cfg.rate; $('cfgPitch').value = cfg.pitch; $('cfgSleep').value = cfg.sleepMin;
-    $('cfgNosy').checked = cfg.nosy; $('cfgSpont').checked = cfg.spont; $('cfgCaption').checked = cfg.caption; $('cfgEar').value = cfg.ear; $('cfgMeter').checked = cfg.meter; $('cfgMic').value = cfg.mic; $('cfgFem').value = cfg.fem ? '1' : '0'; $('cfgSwear').value = cfg.swear; $('cfgPolitica').value = cfg.politica;
+    $('cfgNosy').checked = cfg.nosy; $('cfgSpont').checked = cfg.spont; $('cfgCaption').checked = cfg.caption; $('cfgEar').value = cfg.ear; $('cfgGroq').value = cfg.groqKey; $('cfgMeter').checked = cfg.meter; $('cfgMic').value = cfg.mic; $('cfgFem').value = cfg.fem ? '1' : '0'; $('cfgSwear').value = cfg.swear; $('cfgPolitica').value = cfg.politica;
     $('rateVal').textContent = cfg.rate; $('pitchVal').textContent = cfg.pitch;
     loadVoices(); panel.classList.add('on'); stopListening();
   }
@@ -724,15 +780,15 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     cfg.key = $('cfgKey').value.trim(); cfg.name = $('cfgName').value.trim() || 'Bit'; cfg.model = $('cfgModel').value;
     cfg.voice = $('cfgVoice').value; cfg.rate = +$('cfgRate').value; cfg.pitch = +$('cfgPitch').value;
     cfg.sleepMin = clamp(+$('cfgSleep').value || 4, 1, 120); cfg.nosy = $('cfgNosy').checked; cfg.spont = $('cfgSpont').checked;
-    cfg.caption = $('cfgCaption').checked; cfg.ear = $('cfgEar').value; cfg.meter = $('cfgMeter').checked; cfg.mic = $('cfgMic').value; cfg.fem = $('cfgFem').value === '1'; cfg.swear = $('cfgSwear').value; cfg.politica = $('cfgPolitica').value;
+    cfg.caption = $('cfgCaption').checked; cfg.ear = $('cfgEar').value; cfg.groqKey = $('cfgGroq').value.trim(); cfg.meter = $('cfgMeter').checked; cfg.mic = $('cfgMic').value; cfg.fem = $('cfgFem').value === '1'; cfg.swear = $('cfgSwear').value; cfg.politica = $('cfgPolitica').value;
   }
   gear.addEventListener('click', (e) => { e.stopPropagation(); openPanel(); });
   $('cfgRate').oninput = (e) => ($('rateVal').textContent = e.target.value);
   $('cfgPitch').oninput = (e) => ($('pitchVal').textContent = e.target.value);
   $('cfgSave').onclick = () => {
-    const oldEar = cfg.ear, oldMic = cfg.mic;
+    const oldEar = cfg.ear, oldMic = cfg.mic, oldGroq = cfg.groqKey;
     readPanel(); for (const k in DEFAULTS) store.set(k, cfg[k]);
-    if (cfg.ear !== oldEar || cfg.mic !== oldMic) { location.reload(); return; } // trocar de ouvido/microfone exige recomeçar
+    if (cfg.ear !== oldEar || cfg.mic !== oldMic || cfg.groqKey !== oldGroq) { location.reload(); return; } // trocar de ouvido/microfone exige recomeçar
     panel.classList.remove('on'); document.title = cfg.name; say('Configurado. Não vou agradecer.', 'cetico');
   };
   $('cfgTest').onclick = () => { readPanel(); panel.classList.remove('on'); say(`Oi, eu sou o ${cfg.name}. E não, eu não vou trabalhar de graça.`, 'rindo'); };
@@ -752,7 +808,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   // ---------- Início ----------
   $('start').addEventListener('click', async () => {
     $('start').remove();
-    const ctx = cfg.ear === 'vosk' && window.AudioContext ? createAudioCtx() : null; // tem que nascer dentro do toque
+    const ctx = cfg.ear !== 'google' && window.AudioContext ? createAudioCtx() : null; // tem que nascer dentro do toque
     try { await document.documentElement.requestFullscreen?.({ navigationUI: 'hide' }); } catch {}
     try { await screen.orientation?.lock?.('landscape'); } catch {}
     keepAwake();
@@ -764,7 +820,9 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     const hello = () => say(cfg.key ? pick(['Ah, você de novo.', 'Tô acordado. Infelizmente.', 'Pronto. O que foi agora?']) : 'Tô sem cérebro. Toca na tela e coloca a chave da API na engrenagem.', cfg.key ? 'cetico' : 'sono');
     if (ctx) {
       try {
-        await initVosk(ctx);
+        await initMic(ctx);
+        if (cfg.ear === 'nuvem' && cfg.groqKey) initCloud();
+        else { if (cfg.ear === 'nuvem') caption('Sem chave da Groq: usando o ouvido offline.', 6000); await initVosk(); }
         hello();
         return;
       } catch (err) {

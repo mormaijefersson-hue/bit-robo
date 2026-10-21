@@ -99,11 +99,16 @@
     </label>
     <label>Ouvido
       <select id="cfgEar">
-        <option value="vosk">Offline (silencioso, sem bipe — recomendado)</option>
+        <option value="nuvem">Nuvem — Whisper da Groq (grátis, entende bem, sem bipe — recomendado)</option>
+        <option value="vosk">Offline (sem bipe, mas entende mal fala real)</option>
         <option value="google">Google (entende melhor, mas apita e abaixa a voz)</option>
       </select>
     </label>
-    <label>Microfone (ouvido offline)
+    <label>Chave da Groq (ouvido na nuvem, grátis)
+      <input id="cfgGroq" type="password" autocomplete="off" placeholder="gsk_...">
+      <small>Crie grátis em console.groq.com → API Keys. Sem chave, ele usa o ouvido offline.</small>
+    </label>
+    <label>Microfone
       <select id="cfgMic">
         <option value="voz">Voz (processado pelo Android — recomendado)</option>
         <option value="bruto">Bruto (sem processamento; no S8 fica quase surdo)</option>
