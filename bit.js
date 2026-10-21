@@ -6,7 +6,7 @@
   // ---------- Config ----------
   const DEFAULTS = {
     key: '', name: 'Bit', model: 'claude-haiku-5-5', voice: '', rate: 1.1, pitch: 1.05,
-    sleepMin: 4, nosy: true, spont: false, caption: true, ear: 'vosk', meter: true,
+    sleepMin: 4, nosy: true, spont: false, caption: true, ear: 'vosk', meter: true, mic: 'voz',
   };
   const store = {
     get(k, d) { try { const v = localStorage.getItem('bit.' + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
@@ -510,9 +510,10 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   }
   async function initVosk(ctx) {
     vosk.ctx = ctx;
-    // sem cancelamento de eco: com ele ligado o Android entra em "modo chamada" e a voz do robô sai baixa
+    // 'voz': processamento de voz do Android (ganho, ruído, eco). 'bruto': sem processamento — no S8 chega quase mudo.
+    const proc = cfg.mic !== 'bruto';
     const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true, channelCount: 1 },
+      audio: { echoCancellation: proc, noiseSuppression: proc, autoGainControl: proc, channelCount: 1 },
     });
     const src = ctx.createMediaStreamSource(stream);
     const node = ctx.createScriptProcessor(2048, 1, 1);
@@ -536,6 +537,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
     const rms = Math.sqrt(sum / input.length);
     window.__bitLevel = rms;
+    vosk.peak = Math.max(rms, (vosk.peak || 0) * 0.93); // pico que decai devagar, pra dar pra ler no medidor
     if (!vosk.rec || vosk.muted) { vosk.open = false; vosk.pre.length = 0; return; }
     const chunkMs = (input.length / vosk.ctx.sampleRate) * 1000;
     const data = to16k(input, vosk.ctx.sampleRate);
@@ -564,7 +566,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     meterLvl.style.width = pct(window.__bitLevel || 0) + '%';
     meterLvl.classList.toggle('open', vosk.open);
     meterThr.style.left = pct(vosk.thr || 0.0015) + '%';
-    meterTxt.textContent = `${vosk.status}${vosk.muted ? ' · mudo' : ''}${vosk.last ? ' · ' + vosk.last : ''}`;
+    meterTxt.textContent = `${vosk.status} · nível ${(vosk.peak || 0).toFixed(4)} / limiar ${(vosk.thr || 0.0015).toFixed(4)}${vosk.muted ? ' · mudo' : ''}${vosk.last ? ' · ' + vosk.last : ''}`;
   }, 100);
   function feed(data) { try { vosk.rec.acceptWaveformFloat(data, 16000); } catch (e) { vosk.status = 'erro ao processar: ' + e.message; } }
 
@@ -679,7 +681,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   function openPanel() {
     $('cfgKey').value = cfg.key; $('cfgName').value = cfg.name; $('cfgModel').value = cfg.model;
     $('cfgRate').value = cfg.rate; $('cfgPitch').value = cfg.pitch; $('cfgSleep').value = cfg.sleepMin;
-    $('cfgNosy').checked = cfg.nosy; $('cfgSpont').checked = cfg.spont; $('cfgCaption').checked = cfg.caption; $('cfgEar').value = cfg.ear; $('cfgMeter').checked = cfg.meter;
+    $('cfgNosy').checked = cfg.nosy; $('cfgSpont').checked = cfg.spont; $('cfgCaption').checked = cfg.caption; $('cfgEar').value = cfg.ear; $('cfgMeter').checked = cfg.meter; $('cfgMic').value = cfg.mic;
     $('rateVal').textContent = cfg.rate; $('pitchVal').textContent = cfg.pitch;
     loadVoices(); panel.classList.add('on'); stopListening();
   }
@@ -687,15 +689,15 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     cfg.key = $('cfgKey').value.trim(); cfg.name = $('cfgName').value.trim() || 'Bit'; cfg.model = $('cfgModel').value;
     cfg.voice = $('cfgVoice').value; cfg.rate = +$('cfgRate').value; cfg.pitch = +$('cfgPitch').value;
     cfg.sleepMin = clamp(+$('cfgSleep').value || 4, 1, 120); cfg.nosy = $('cfgNosy').checked; cfg.spont = $('cfgSpont').checked;
-    cfg.caption = $('cfgCaption').checked; cfg.ear = $('cfgEar').value; cfg.meter = $('cfgMeter').checked;
+    cfg.caption = $('cfgCaption').checked; cfg.ear = $('cfgEar').value; cfg.meter = $('cfgMeter').checked; cfg.mic = $('cfgMic').value;
   }
   gear.addEventListener('click', (e) => { e.stopPropagation(); openPanel(); });
   $('cfgRate').oninput = (e) => ($('rateVal').textContent = e.target.value);
   $('cfgPitch').oninput = (e) => ($('pitchVal').textContent = e.target.value);
   $('cfgSave').onclick = () => {
-    const oldEar = cfg.ear;
+    const oldEar = cfg.ear, oldMic = cfg.mic;
     readPanel(); for (const k in DEFAULTS) store.set(k, cfg[k]);
-    if (cfg.ear !== oldEar) { location.reload(); return; } // trocar de ouvido exige recomeçar
+    if (cfg.ear !== oldEar || cfg.mic !== oldMic) { location.reload(); return; } // trocar de ouvido/microfone exige recomeçar
     panel.classList.remove('on'); document.title = cfg.name; say('Configurado. Não vou agradecer.', 'cetico');
   };
   $('cfgTest').onclick = () => { readPanel(); panel.classList.remove('on'); say(`Oi, eu sou o ${cfg.name}. E não, eu não vou trabalhar de graça.`, 'rindo'); };
