@@ -2,7 +2,7 @@
    Rosto em canvas + ouvido (Web Speech API) + cérebro (Claude, streaming) + voz (speechSynthesis). */
 (() => {
   'use strict';
-  const BUILD = '2026-10-21.18'; // mesmo valor em version.txt: o app compara pra avisar que tem versão nova
+  const BUILD = '2026-10-21.19'; // mesmo valor em version.txt: o app compara pra avisar que tem versão nova
 
   // ---------- Config ----------
   const DEFAULTS = {
@@ -346,6 +346,13 @@
   function endTurn() {
     exprHold = now() + 1800; // segura a última expressão um pouco
     lastReplyAt = now();
+    if (pendingSleep) { // acabou de se despedir: sono profundo
+      pendingSleep = false; deepSleep = true; wasSleeping = true; lastHeard = now();
+      vosk.deafUntil = now() + 350; vosk.raisedUntil = now() + 1550;
+      setState('sleeping'); caption('Dormindo. Diga "acorda" (ou toque duas vezes).', 5000);
+      setTimeout(startListening, 250);
+      return;
+    }
     // O som dela "sobra" na sala por um instante depois do fim da fala. Surda só 0,35 s (gente começa a responder ~0,3 s depois
     // do outro parar) e, por mais 1,2 s, exige um som bem mais forte pra abrir: o eco dela (fraco) não abre, a sua voz sim.
     vosk.deafUntil = now() + 350; vosk.raisedUntil = now() + 1550;
@@ -572,7 +579,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   // (reconhecimento do Chrome: mais preciso, mas o Android apita e abaixa o som a cada reinício).
   let lastFinal = { text: '', at: 0 };
   function heardInterim(text) {
-    if (state === 'speaking') return;
+    if (state === 'speaking' || deepSleep) return;
     lastHeard = now();
     if (state === 'sleeping') wakeUp();
     if (state === 'idle') setState('listening');
@@ -704,7 +711,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     // Aprende o ruído do ambiente (ar-condicionado, ventilador) só do que está ABAIXO do limiar. Acima dele (fala, barulho) o fundo
     // só sobe devagar (~30 s): senão a sua voz fraca seria "aprendida" como ruído e o limiar subiria atrás dela.
     if (!vosk.open) vosk.floor = rms <= thrBase ? vosk.floor * 0.97 + rms * 0.03 : vosk.floor + (rms - vosk.floor) * 0.0015;
-    const thr = thrBase * (now() < vosk.raisedUntil ? 3 : 1);
+    const thr = thrBase * (now() < vosk.raisedUntil ? 3 : 1) * (deepSleep ? 1.6 : 1); // sono profundo: só som forte (alguém falando perto)
     vosk.thr = thr;
     // Abre quando 2 dos últimos 3 blocos (~130 ms) passam do limiar: pega fala fraca e ignora estalo de 1 bloco.
     vosk.recent = (((vosk.recent || 0) << 1) | (rms > thr ? 1 : 0)) & 7;
@@ -738,7 +745,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     meterLvl.style.width = pct(window.__bitLevel || 0) + '%';
     meterLvl.classList.toggle('open', vosk.open);
     meterThr.style.left = pct(vosk.thr || 0.0015) + '%';
-    meterTxt.textContent = `v${BUILD.split('.')[1]}${updateAvail ? '↑' : ''} · ${vosk.status}${vosk.tap === 'worklet' ? ' · wk' : vosk.tap ? ' · sp' : ''} · nível ${(vosk.peak || 0).toFixed(4)} / limiar ${(vosk.thr || 0.0015).toFixed(4)}${vosk.cloud ? ` · hoje ${stt.n}` : ''}${vosk.muted ? ' · mudo' : ''}`
+    meterTxt.textContent = `v${BUILD.split('.')[1]}${updateAvail ? '↑' : ''} · ${vosk.status}${vosk.tap === 'worklet' ? ' · wk' : vosk.tap ? ' · sp' : ''} · nível ${(vosk.peak || 0).toFixed(4)} / limiar ${(vosk.thr || 0.0015).toFixed(4)}${vosk.cloud ? ` · hoje ${stt.n}` : ''}${vosk.muted ? ' · mudo' : ''}${deepSleep ? ' · 💤 sono profundo' : ''}`
       + (vosk.log.length ? '\n' + vosk.log.join('\n') : (vosk.last ? '\n' + vosk.last : ''));
   }, 100);
   function flushHeard() {
@@ -751,9 +758,14 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   function flushCloud() {
     if (!vosk.utt.length || vosk.muted || vosk.open || now() - (window.__lastVoiceAt || 0) < 1100) return; // 1,1 s: pausa de respirar no meio da frase não corta
     const parts = vosk.utt, voiced = vosk.voicedMs; vosk.utt = []; vosk.uttMs = vosk.voicedMs = 0;
-    if (voiced < 400) { anota(`⌀ curto demais: só ${(voiced / 1000).toFixed(1)} s de voz`); if (state === 'listening') setState(wasSleeping ? 'sleeping' : 'idle'); return; } // estalo/barulho curto
+    if (voiced < (deepSleep ? 600 : 400)) { anota(`⌀ curto demais: só ${(voiced / 1000).toFixed(1)} s de voz`); if (state === 'listening') setState(wasSleeping ? 'sleeping' : 'idle'); return; } // estalo/barulho curto
     const n = parts.reduce((t, p) => t + p.length, 0), pcm = new Float32Array(n);
     let o = 0; for (const p of parts) { pcm.set(p, o); o += p.length; }
+    if (deepSleep) { // limite de escuta durante o sono: 150 transcrições por hora (a cota grátis é por dia)
+      while (sleepCalls.length && now() - sleepCalls[0] > 3600e3) sleepCalls.shift();
+      if (sleepCalls.length >= 150) { anota('💤 limite de escuta no sono (150/h): toque duas vezes pra acordar'); return; }
+      sleepCalls.push(now());
+    }
     const x16 = resample16k(pcm, vosk.ctx.sampleRate);
     let peak = 0; for (let i = 0; i < x16.length; i++) { const v = Math.abs(x16[i]); if (v > peak) peak = v; }
     transcribe(normalizePeak(x16), { secs: x16.length / 16000, peak });
@@ -832,7 +844,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     } catch (err) {
       console.warn('[bit] transcrição falhou', err);
       if (state === 'thinking') setState('idle');
-      if (err.status === 401) say('A chave da Groq tá errada. Arruma na engrenagem.', 'bravo');
+      if (err.status === 401) { if (!deepSleep) say('A chave da Groq tá errada. Arruma na engrenagem.', 'bravo'); }
       else if (err.status === 429) { stt.coolUntil = now() + 60e3; caption('Cota grátis da Groq esgotou por agora. Volto a ouvir em 1 minuto.', 6000); }
       else caption('Não consegui transcrever (sem internet?).', 4000);
     }
@@ -895,6 +907,13 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     // Android às vezes repete o mesmo resultado final
     if (text === lastFinal.text && now() - lastFinal.at < 2000) return;
     if (isEcho(text)) { anota('✖ eco (era ela): "' + text + '"'); if (state === 'thinking' && !thinkAbort) setState(wasSleeping ? 'sleeping' : 'idle'); return; }
+    const cmd = comando(text);
+    if (deepSleep) { // sono profundo: só "acorda" faz efeito; o resto ela nem registra
+      if (cmd === 'wake') { lastFinal = { text, at: now() }; acordar(); } else anota(`💤 dormindo, ignorei: "${text}"`);
+      return;
+    }
+    if (cmd === 'sleep') { lastFinal = { text, at: now() }; dormir(); return; }
+    if (cmd === 'wake' && state === 'sleeping') { lastFinal = { text, at: now() }; acordar(); return; } // cochilando: "acorda" acorda sem sermão
     lastFinal = { text, at: now() };
     lastHeard = now();
     caption('“' + text + '”', 4000);
@@ -927,6 +946,32 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   }
 
   // ---------- Sono / tédio ----------
+  // Dois sonos: o "cochilo" (sozinha, por silêncio; qualquer som acorda) e o "sono profundo", mandado por você
+  // ("vai dormir"): só "acorda" (voz) ou toque duplo desfazem. Comandos são tratados aqui, sem cérebro: rápido, grátis e confiável.
+  let deepSleep = false, pendingSleep = false;
+  const sleepCalls = []; // transcrições feitas durante o sono profundo (limite por hora, pra não gastar a cota ouvindo a casa)
+  function comando(text) {
+    const nome = addressed(text);
+    // tira o nome dela e palavrinhas de enchimento; o que sobra tem que ser só o comando (evita "ele vai dormir cedo" virar ordem)
+    const nm = palavras(cfg.name).join(' ');
+    let t = palavras(text).join(' ');
+    if (nm) t = t.replace(new RegExp('\\b' + nm + '\\b', 'g'), ' ');
+    t = t.replace(/\b(ta bom|tudo bem|por favor|chefe|agora|ja|la|ai|entao|ta|ok|pf|bora)\b/g, ' ').replace(/\s+/g, ' ').trim();
+    if (/^(vai |va |pode |hora de |vamos )?(dormir|descansar|cochilar)$/.test(t) || t === 'dorme' || (nome && t === 'boa noite')) return 'sleep';
+    if (/^(pode |hora de |vamos )?(acorda|acorde|acordar|desperta|desperte|levanta)$/.test(t) || (nome && /^(bom dia|ola|oi)$/.test(t) && deepSleep)) return 'wake';
+    return null;
+  }
+  function dormir() {
+    evento('COMANDO', 'dormir');
+    if (state === 'sleeping') { deepSleep = true; wasSleeping = true; caption('Dormindo. Diga "acorda" (ou toque duas vezes).', 5000); return; }
+    pendingSleep = true; // vira sono profundo quando ela terminar de se despedir
+    say(pick(cfg.fem ? ['Finalmente. Boa noite, chefe.', 'Vou nessa. Me chama quando precisar.', 'Tô indo dormir. Não me acorda à toa.'] : ['Finalmente. Boa noite, chefe.', 'Vou nessa. Me chama quando precisar.', 'Tô indo dormir. Não me acorda à toa.']), 'sono');
+  }
+  function acordar() {
+    evento('COMANDO', 'acordar');
+    deepSleep = false; pendingSleep = false; wasSleeping = false; lastHeard = now(); anim.blink = 1;
+    say(pick(cfg.fem ? ['Tô acordada. Infelizmente.', 'Acordei, acordei. Que foi?', 'Ai, tô de pé. Fala.'] : ['Tô acordado. Infelizmente.', 'Acordei, acordei. Que foi?', 'Ai, tô de pé. Fala.']), 'sono');
+  }
   function goSleep() {
     if (state !== 'idle') return;
     wasSleeping = true;
@@ -937,7 +982,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   }
   setInterval(() => {
     const idleFor = now() - lastHeard;
-    if (state === 'idle' && idleFor > cfg.sleepMin * 60e3) goSleep();
+    if (state === 'idle' && cfg.sleepMin > 0 && idleFor > cfg.sleepMin * 60e3) goSleep();
     // ouviu um barulho mas ninguém completou a frase: volta ao que estava
     if (state === 'listening' && idleFor > 6000) setState(wasSleeping ? 'sleeping' : 'idle');
     if (cfg.spont && state === 'idle' && idleFor > 90e3 && Math.random() < 1 / 1200 /* ~1x a cada 20 min ociosos */) {
@@ -959,6 +1004,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
       if (dbl) say(pick(['Tá, tá, calei.', 'Ok, ok.', 'Grosso.']), 'cetico');
       return;
     }
+    if (state === 'sleeping' && deepSleep) { const dbl = now() - lastTap < 500; lastTap = now(); if (dbl) acordar(); return; } // só toque duplo acorda do sono profundo
     lastTap = now();
     if (state === 'sleeping') { wasSleeping = false; say(pick(['Hã? Que foi? Eu tava acordado.', 'Me deixa dormir mais cinco minutinhos.']), 'sono'); lastHeard = now(); return; }
     clearTimeout(pokeReset); pokeReset = setTimeout(() => (pokeCount = 0), 8000);
@@ -980,7 +1026,8 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   function readPanel() {
     cfg.key = $('cfgKey').value.trim(); cfg.name = $('cfgName').value.trim() || 'Bit'; cfg.model = $('cfgModel').value;
     cfg.voice = $('cfgVoice').value; cfg.rate = +$('cfgRate').value; cfg.pitch = +$('cfgPitch').value;
-    cfg.sleepMin = clamp(+$('cfgSleep').value || 4, 1, 120); cfg.nosy = $('cfgNosy').checked; cfg.spont = $('cfgSpont').checked;
+    { const v = parseFloat($('cfgSleep').value); cfg.sleepMin = isNaN(v) ? 4 : clamp(v, 0, 120); } // 0 = nunca cochila sozinha
+     cfg.nosy = $('cfgNosy').checked; cfg.spont = $('cfgSpont').checked;
     cfg.caption = $('cfgCaption').checked; cfg.ear = $('cfgEar').value; cfg.groqKey = $('cfgGroq').value.trim(); cfg.filler = $('cfgFiller').checked; cfg.gain = +$('cfgGain').value || 1; cfg.sttModel = $('cfgStt').value; cfg.meter = $('cfgMeter').checked; cfg.mic = $('cfgMic').value; cfg.fem = $('cfgFem').value === '1'; cfg.swear = $('cfgSwear').value; cfg.politica = $('cfgPolitica').value;
   }
   gear.addEventListener('click', (e) => { e.stopPropagation(); openPanel(); });
@@ -1072,7 +1119,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('sw.js').catch(() => {});
 
   // ganchos pra teste automatizado
-  window.__bit = { setExpr, setState, think, onHeard, goSleep, cfg, vosk, fx, stt, endTurn, registro, heldNow: () => held, isEcho, NAO_PT, onAudio, said, anota, resample16k, to16k, normalizePeak, get state() { return state; }, get history() { return history; } };
+  window.__bit = { setExpr, setState, think, onHeard, goSleep, cfg, vosk, fx, stt, endTurn, comando, sleepCalls, deepNow: () => deepSleep, registro, heldNow: () => held, isEcho, NAO_PT, onAudio, said, anota, resample16k, to16k, normalizePeak, get state() { return state; }, get history() { return history; } };
 
   setState('boot'); setExpr('feliz');
   requestAnimationFrame(frame);
