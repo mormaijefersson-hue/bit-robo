@@ -6,7 +6,7 @@
   // ---------- Config ----------
   const DEFAULTS = {
     key: '', name: 'Bit', model: 'claude-haiku-5-5', voice: '', rate: 1.1, pitch: 1.05,
-    sleepMin: 4, nosy: true, spont: false, caption: true, ear: 'nuvem', groqKey: '', meter: true, mic: 'voz', fem: true, swear: 'liberado', politica: 'bolsonarista',
+    sleepMin: 4, nosy: true, spont: false, caption: true, ear: 'nuvem', groqKey: '', filler: true, meter: true, mic: 'voz', fem: true, swear: 'liberado', politica: 'bolsonarista',
   };
   const store = {
     get(k, d) { try { const v = localStorage.getItem('bit.' + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
@@ -265,29 +265,37 @@
     const sel = $('cfgVoice');
     sel.innerHTML = '';
     if (!voices.length) sel.innerHTML = '<option value="">Padrão do sistema</option>';
+    // vozes "network" (online) do Google costumam ser as mais naturais: ficam no topo da lista
+    voices.sort((a, b) => /network/i.test(b.name) - /network/i.test(a.name));
     for (const v of voices) {
-      const o = document.createElement('option'); o.value = v.name; o.textContent = `${v.name} (${v.lang})`;
+      const o = document.createElement('option'); o.value = v.name; o.textContent = `${v.name} (${v.lang})${/network/i.test(v.name) ? ' · online' : ''}`;
       if (v.name === cfg.voice) o.selected = true; sel.appendChild(o);
     }
   }
   if (synth) { loadVoices(); synth.onvoiceschanged = loadVoices; }
   function chooseVoice() {
-    return voices.find((v) => v.name === cfg.voice) || voices.find((v) => /pt-BR/i.test(v.lang) && /google/i.test(v.name))
+    return voices.find((v) => v.name === cfg.voice) || voices.find((v) => /pt-BR/i.test(v.lang) && /network/i.test(v.name))
+      || voices.find((v) => /pt-BR/i.test(v.lang) && /google/i.test(v.name))
       || voices.find((v) => /pt-BR/i.test(v.lang)) || voices[0] || null;
   }
 
   const speakQ = [];               // [{text, expr}]
   let speaking = false, streamDone = true, turnId = 0, uSerial = 0;
-  function enqueueSpeech(text, expr, id) {
+  // Interjeição enquanto o cérebro pensa ("hum…", "pera aí…"): disfarça a pausa, como gente faz.
+  const fx = { chance: 0.7, delay: 600 };
+  const FILLERS = ['Hum…', 'Então…', 'Deixa eu ver…', 'Pera aí…', 'Bom…'];
+  let fillerTimer = 0, lastFiller = '', lastReplyAt = 0;
+  function enqueueSpeech(text, expr, id, filler = false) {
     if (id !== turnId) return;
-    speakQ.push({ text, expr, id });
+    if (!filler) clearTimeout(fillerTimer);
+    speakQ.push({ text, expr, id, filler });
     if (!speaking) speakNext();
   }
   function speakNext() {
     const item = speakQ.shift();
     if (!item) {
       speaking = false;
-      if (streamDone) endTurn();
+      if (streamDone) endTurn(); else setState('thinking'); // acabou a interjeição, a resposta ainda vem
       return;
     }
     if (item.id !== turnId) return speakNext();
@@ -295,7 +303,7 @@
     const my = ++uSerial;
     stopListening();
     setState('speaking');
-    if (item.expr) setExpr(item.expr, 60e3); else if (now() > exprHold) setExpr('neutro');
+    if (item.expr) setExpr(item.expr, item.filler ? 1500 : 60e3); else if (now() > exprHold) setExpr('neutro');
     window.__bitSpoken = (window.__bitSpoken || []).concat([{ text: item.text, at: now() }]);
     if (!synth) { setTimeout(() => my === uSerial && speakNext(), 40 * item.text.length); return; }
     const u = new SpeechSynthesisUtterance(item.text);
@@ -311,12 +319,13 @@
     synth.speak(u);
   }
   function shutUp() {
-    turnId++; uSerial++; speakQ.length = 0; abortThinking();
+    turnId++; uSerial++; speakQ.length = 0; abortThinking(); clearTimeout(fillerTimer);
     if (synth) synth.cancel();
     speaking = false; streamDone = true;
   }
   function endTurn() {
     exprHold = now() + 1800; // segura a última expressão um pouco
+    lastReplyAt = now();
     setState('idle');
     lastHeard = now();
     setTimeout(startListening, 250);
@@ -409,7 +418,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     };
   }
 
-  async function think(userText, ctxNote = '') {
+  async function think(userText, ctxNote = '', opts = {}) {
     shutUp();
     const id = turnId;
     streamDone = false;
@@ -419,6 +428,14 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     history.push({ role: 'user', content: userText });
 
     if (!cfg.key) { offlineReply(userText, id); return; }
+
+    if (opts.filler && cfg.filler && Math.random() < fx.chance) {
+      fillerTimer = setTimeout(() => {
+        if (id !== turnId || speaking || speakQ.length) return;
+        let f; do { f = pick(FILLERS); } while (f === lastFiller);
+        lastFiller = f; enqueueSpeech(f, 'pensativo', id, true);
+      }, fx.delay);
+    }
 
     const ac = new AbortController(); thinkAbort = ac;
     let full = '', ignored = false, gotAny = false;
@@ -457,6 +474,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
       }
       chunker.flush();
       if (id !== turnId) return;
+      clearTimeout(fillerTimer);
       thinkAbort = null;
       if (ignored || !gotAny) { history.pop(); streamDone = true; if (!speaking) { setState('idle'); setTimeout(startListening, 150); } return; }
       history.push({ role: 'assistant', content: full.trim() });
@@ -464,6 +482,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
       if (!speaking && !speakQ.length) endTurn();
     } catch (err) {
       if (err.name === 'AbortError' || id !== turnId) return;
+      clearTimeout(fillerTimer);
       history.pop();
       console.warn('[bit] erro', err);
       streamDone = true;
@@ -601,7 +620,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     meterLvl.style.width = pct(window.__bitLevel || 0) + '%';
     meterLvl.classList.toggle('open', vosk.open);
     meterThr.style.left = pct(vosk.thr || 0.0015) + '%';
-    meterTxt.textContent = `${vosk.status} · nível ${(vosk.peak || 0).toFixed(4)} / limiar ${(vosk.thr || 0.0015).toFixed(4)}${vosk.muted ? ' · mudo' : ''}${vosk.last ? ' · ' + vosk.last : ''}`;
+    meterTxt.textContent = `${vosk.status} · nível ${(vosk.peak || 0).toFixed(4)} / limiar ${(vosk.thr || 0.0015).toFixed(4)}${vosk.cloud ? ` · hoje ${stt.n}` : ''}${vosk.muted ? ' · mudo' : ''}${vosk.last ? ' · ' + vosk.last : ''}`;
   }, 100);
   function flushHeard() {
     if (vosk.cloud) return flushCloud();
@@ -613,7 +632,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   function flushCloud() {
     if (!vosk.utt.length || vosk.muted || vosk.open || now() - (window.__lastVoiceAt || 0) < 900) return;
     const parts = vosk.utt, voiced = vosk.voicedMs; vosk.utt = []; vosk.uttMs = vosk.voicedMs = 0;
-    if (voiced < 300) { if (state === 'listening') setState(wasSleeping ? 'sleeping' : 'idle'); return; } // estalo/barulho curto
+    if (voiced < 500) { if (state === 'listening') setState(wasSleeping ? 'sleeping' : 'idle'); return; } // estalo/barulho curto
     const n = parts.reduce((t, p) => t + p.length, 0), pcm = new Float32Array(n);
     let o = 0; for (const p of parts) { pcm.set(p, o); o += p.length; }
     transcribe(pcm);
@@ -629,8 +648,18 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   }
   // frases que o Whisper inventa em silêncio/ruído (vêm de legenda de vídeo)
   const WHISPER_FANTASMA = /legenda|amara\.org|obrigad[oa] por assistir|inscreva|se inscrev|até a próxima|tchau,? tchau|^\W*$/i;
+  // contador diário (cota grátis da Groq) e pausa de 60 s quando ela reclama de excesso (429)
+  const stt = Object.assign({ day: '', n: 0, coolUntil: 0 }, store.get('stt', {}));
+  function sttBump() {
+    const d = new Date(), day = `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+    if (stt.day !== day) { stt.day = day; stt.n = 0; }
+    stt.n++; store.set('stt', { day: stt.day, n: stt.n });
+    if (stt.n === 1800) caption('Já usei 1.800 transcrições hoje: perto do limite grátis da Groq.', 8000);
+  }
   async function transcribe(pcm) {
     const myTurn = turnId;
+    if (now() < stt.coolUntil) { if (state === 'listening') setState(wasSleeping ? 'sleeping' : 'idle'); return; } // cota esgotada: espera
+    sttBump();
     if (state === 'listening' || state === 'idle') setState('thinking');
     const fd = new FormData();
     fd.append('file', wav16k(pcm), 'fala.wav');
@@ -653,7 +682,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
       console.warn('[bit] transcrição falhou', err);
       if (state === 'thinking') setState('idle');
       if (err.status === 401) say('A chave da Groq tá errada. Arruma na engrenagem.', 'bravo');
-      else if (err.status === 429) caption('Cota grátis da Groq esgotou por agora. Tenta daqui a pouco.', 6000);
+      else if (err.status === 429) { stt.coolUntil = now() + 60e3; caption('Cota grátis da Groq esgotou por agora. Volto a ouvir em 1 minuto.', 6000); }
       else caption('Não consegui transcrever (sem internet?).', 4000);
     }
   }
@@ -718,7 +747,14 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     lastHeard = now();
     caption('“' + text + '”', 4000);
     window.__bitHeard = (window.__bitHeard || []).concat([{ text, at: now() }]);
-    if (!cfg.nosy && !addressed(text) && now() - lastTalk > 45e3) { if (state === 'listening') setState(wasSleeping ? 'sleeping' : 'idle'); return; }
+    // Fora do modo intrometido: só responde se chamarem pelo nome ou se for continuação da conversa (10 s depois da resposta).
+    const convo = now() - Math.max(lastReplyAt, lastTalk) < 10e3;
+    if (!cfg.nosy && !addressed(text) && !convo) {
+      if (state === 'listening' || (state === 'thinking' && !thinkAbort)) setState(wasSleeping ? 'sleeping' : 'idle');
+      return;
+    }
+    // interjeição só quando a fala é claramente pra ela (evita "hum…" pra ruído em modo intrometido)
+    const filler = addressed(text) || convo || /\?\s*$/.test(text);
 
     let note = '';
     if (state === 'sleeping' || wasSleeping) {
@@ -729,7 +765,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     if (state === 'thinking' && thinkAbort && history.length && history[history.length - 1].role === 'user') {
       text = history.pop().content + ' ' + text;
     }
-    think(text, note);
+    think(text, note, { filler });
   }
 
   // ---------- Sono / tédio ----------
@@ -772,7 +808,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   function openPanel() {
     $('cfgKey').value = cfg.key; $('cfgName').value = cfg.name; $('cfgModel').value = cfg.model;
     $('cfgRate').value = cfg.rate; $('cfgPitch').value = cfg.pitch; $('cfgSleep').value = cfg.sleepMin;
-    $('cfgNosy').checked = cfg.nosy; $('cfgSpont').checked = cfg.spont; $('cfgCaption').checked = cfg.caption; $('cfgEar').value = cfg.ear; $('cfgGroq').value = cfg.groqKey; $('cfgMeter').checked = cfg.meter; $('cfgMic').value = cfg.mic; $('cfgFem').value = cfg.fem ? '1' : '0'; $('cfgSwear').value = cfg.swear; $('cfgPolitica').value = cfg.politica;
+    $('cfgNosy').checked = cfg.nosy; $('cfgSpont').checked = cfg.spont; $('cfgCaption').checked = cfg.caption; $('cfgEar').value = cfg.ear; $('cfgGroq').value = cfg.groqKey; $('cfgFiller').checked = cfg.filler; $('cfgMeter').checked = cfg.meter; $('cfgMic').value = cfg.mic; $('cfgFem').value = cfg.fem ? '1' : '0'; $('cfgSwear').value = cfg.swear; $('cfgPolitica').value = cfg.politica;
     $('rateVal').textContent = cfg.rate; $('pitchVal').textContent = cfg.pitch;
     loadVoices(); panel.classList.add('on'); stopListening();
   }
@@ -780,7 +816,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     cfg.key = $('cfgKey').value.trim(); cfg.name = $('cfgName').value.trim() || 'Bit'; cfg.model = $('cfgModel').value;
     cfg.voice = $('cfgVoice').value; cfg.rate = +$('cfgRate').value; cfg.pitch = +$('cfgPitch').value;
     cfg.sleepMin = clamp(+$('cfgSleep').value || 4, 1, 120); cfg.nosy = $('cfgNosy').checked; cfg.spont = $('cfgSpont').checked;
-    cfg.caption = $('cfgCaption').checked; cfg.ear = $('cfgEar').value; cfg.groqKey = $('cfgGroq').value.trim(); cfg.meter = $('cfgMeter').checked; cfg.mic = $('cfgMic').value; cfg.fem = $('cfgFem').value === '1'; cfg.swear = $('cfgSwear').value; cfg.politica = $('cfgPolitica').value;
+    cfg.caption = $('cfgCaption').checked; cfg.ear = $('cfgEar').value; cfg.groqKey = $('cfgGroq').value.trim(); cfg.filler = $('cfgFiller').checked; cfg.meter = $('cfgMeter').checked; cfg.mic = $('cfgMic').value; cfg.fem = $('cfgFem').value === '1'; cfg.swear = $('cfgSwear').value; cfg.politica = $('cfgPolitica').value;
   }
   gear.addEventListener('click', (e) => { e.stopPropagation(); openPanel(); });
   $('cfgRate').oninput = (e) => ($('rateVal').textContent = e.target.value);
@@ -841,7 +877,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('sw.js').catch(() => {});
 
   // ganchos pra teste automatizado
-  window.__bit = { setExpr, setState, think, onHeard, goSleep, cfg, vosk, get state() { return state; }, get history() { return history; } };
+  window.__bit = { setExpr, setState, think, onHeard, goSleep, cfg, vosk, fx, stt, get state() { return state; }, get history() { return history; } };
 
   setState('boot'); setExpr('feliz');
   requestAnimationFrame(frame);
