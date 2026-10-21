@@ -1,0 +1,28 @@
+# Baixa o modelo de reconhecimento de voz offline (português) e salva no repositório.
+name: Modelo de voz
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/modelo-voz.yml']
+permissions:
+  contents: write
+jobs:
+  baixar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Baixar e empacotar
+        run: |
+          curl -fL --retry 3 -o m.zip https://alphacephei.com/vosk/models/vosk-model-small-pt-0.3.zip
+          unzip -q m.zip
+          mv vosk-model-small-pt-0.3 model
+          tar czf vosk-pt.tar.gz model
+          rm -rf model m.zip
+          ls -la vosk-pt.tar.gz
+      - name: Salvar
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add vosk-pt.tar.gz
+          git commit -m "Modelo de voz offline em português (Vosk small pt 0.3)" || exit 0
+          git push
