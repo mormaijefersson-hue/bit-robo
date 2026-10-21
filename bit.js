@@ -544,7 +544,9 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     if (!vosk.open) vosk.floor = vosk.floor * 0.97 + rms * 0.03; // aprende o ruído do ambiente (ar-condicionado, ventilador)
     const thr = Math.max(0.0015, vosk.floor * 2.5);
     vosk.thr = thr;
-    if (rms > thr) {
+    // histerese: abre no limiar, mas depois de aberto só conta silêncio abaixo de 40% dele
+    // (palavras mais fracas no meio da frase não fecham o portão)
+    if (rms > (vosk.open ? thr * 0.4 : thr)) {
       if (!vosk.open) { vosk.open = true; for (const p of vosk.pre) feed(p); vosk.pre.length = 0; }
       vosk.quietMs = 0; window.__lastVoiceAt = now();
     } else if (vosk.open) vosk.quietMs += chunkMs;
