@@ -1,11 +1,22 @@
-// Cache simples: abre mesmo com Wi-Fi instável; sempre tenta a versão nova primeiro.
-const CACHE = 'bit-v1';
+// Cache: abre mesmo com Wi-Fi instável. Arquivos do app: tenta a versão nova primeiro.
+// Ouvido offline (biblioteca + modelo, ~36 MB): baixa uma vez só e fica guardado.
+const CACHE = 'bit-v2';
 const FILES = ['./', 'index.html', 'bit.js', 'manifest.json', 'icon.png'];
+const BIG = /\/(vosk\.js|vosk-pt\.tar\.gz)$/;
 self.addEventListener('install', (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES))); self.skipWaiting(); });
-self.addEventListener('activate', (e) => { e.waitUntil(self.clients.claim()); });
+self.addEventListener('activate', (e) => {
+  e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim()));
+});
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   if (url.origin !== location.origin || e.request.method !== 'GET') return; // API do Claude passa direto
+  if (BIG.test(url.pathname)) {
+    e.respondWith(caches.match(e.request).then((hit) => hit || fetch(e.request).then((r) => {
+      if (r.ok) { const copy = r.clone(); caches.open(CACHE).then((c) => c.put(e.request, copy)); }
+      return r;
+    })));
+    return;
+  }
   e.respondWith(fetch(e.request).then((r) => { const copy = r.clone(); caches.open(CACHE).then((c) => c.put(e.request, copy)); return r; })
     .catch(() => caches.match(e.request)));
 });

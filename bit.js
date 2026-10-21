@@ -6,7 +6,7 @@
   // ---------- Config ----------
   const DEFAULTS = {
     key: '', name: 'Bit', model: 'claude-haiku-5-5', voice: '', rate: 1.1, pitch: 1.05,
-    sleepMin: 4, nosy: true, spont: false, caption: true,
+    sleepMin: 4, nosy: true, spont: false, caption: true, ear: 'vosk',
   };
   const store = {
     get(k, d) { try { const v = localStorage.getItem('bit.' + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
@@ -476,9 +476,73 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     }, 150);
   }
 
-  // ---------- Ouvido (reconhecimento de voz) ----------
+  // ---------- Ouvido ----------
+  // Dois modos: 'vosk' (offline, contínuo, sem bipe e sem abaixar o volume da voz) e 'google'
+  // (reconhecimento do Chrome: mais preciso, mas o Android apita e abaixa o som a cada reinício).
+  let lastFinal = { text: '', at: 0 };
+  function heardInterim(text) {
+    if (state === 'speaking') return;
+    lastHeard = now();
+    if (state === 'sleeping') wakeUp();
+    if (state === 'idle') setState('listening');
+    caption(text, 2500);
+  }
+
+  const vosk = { ctx: null, rec: null, muted: true, open: false, quietMs: 0, floor: 0.003, pre: [] };
+  function loadScript(src) {
+    return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
+  }
+  // precisa ser chamado dentro do toque (o Chrome só libera áudio com gesto do usuário)
+  function createAudioCtx() {
+    try { return new AudioContext({ sampleRate: 16000 }); } catch { return new AudioContext(); }
+  }
+  async function initVosk(ctx) {
+    vosk.ctx = ctx;
+    // sem cancelamento de eco: com ele ligado o Android entra em "modo chamada" e a voz do robô sai baixa
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 },
+    });
+    const src = ctx.createMediaStreamSource(stream);
+    const node = ctx.createScriptProcessor(2048, 1, 1);
+    // ligado na saída (em silêncio): o processador só roda assim, e os botões de volume passam a controlar a mídia
+    src.connect(node); node.connect(ctx.destination);
+    node.onaudioprocess = (e) => { e.outputBuffer.getChannelData(0).fill(0); onAudio(e.inputBuffer.getChannelData(0)); };
+    vosk.node = node; vosk.stream = stream;
+    statusEl.textContent = 'carregando o ouvido…';
+    await loadScript('vosk.js');
+    const model = await window.Vosk.createModel(new URL('vosk-pt.tar.gz', location.href).href, -1);
+    const rec = new model.KaldiRecognizer(ctx.sampleRate);
+    rec.on('partialresult', (m) => { const p = m.result?.partial; if (p && !vosk.muted) heardInterim(p); });
+    rec.on('result', (m) => { const t = m.result?.text; if (t && !vosk.muted) onHeard(t.trim()); });
+    vosk.rec = rec;
+    if (statusEl.textContent === 'carregando o ouvido…') statusEl.textContent = '';
+  }
+  // Portão de voz: só manda áudio pro reconhecedor quando passa do barulho de fundo (economiza CPU e bateria).
+  function onAudio(input) {
+    let sum = 0;
+    for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
+    const rms = Math.sqrt(sum / input.length);
+    window.__bitLevel = rms;
+    if (!vosk.rec || vosk.muted) { vosk.open = false; vosk.pre.length = 0; return; }
+    const chunkMs = (input.length / vosk.ctx.sampleRate) * 1000;
+    const data = new Float32Array(input);
+    if (!vosk.open) vosk.floor = vosk.floor * 0.97 + rms * 0.03; // aprende o ruído do ambiente (ar-condicionado, ventilador)
+    const thr = Math.max(0.004, vosk.floor * 2.5);
+    if (rms > thr) {
+      if (!vosk.open) { vosk.open = true; for (const p of vosk.pre) feed(p); vosk.pre.length = 0; }
+      vosk.quietMs = 0;
+    } else if (vosk.open) vosk.quietMs += chunkMs;
+    if (vosk.open) {
+      feed(data);
+      if (vosk.quietMs > 1500) { vosk.open = false; vosk.rec.retrieveFinalResult(); }
+    } else {
+      vosk.pre.push(data); if (vosk.pre.length > 4) vosk.pre.shift(); // meio segundo antes da fala, pra não comer o começo
+    }
+  }
+  function feed(data) { try { vosk.rec.acceptWaveformFloat(data, vosk.ctx.sampleRate); } catch {} }
+
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  let rec = null, wantListen = false, recRunning = false, recBackoff = 300, lastFinal = { text: '', at: 0 };
+  let rec = null, wantListen = false, recRunning = false, recBackoff = 300;
   function initRec() {
     if (!SR) return null;
     const r = new SR();
@@ -490,12 +554,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
         const res = e.results[i];
         if (res.isFinal) fin += res[0].transcript; else interim += res[0].transcript;
       }
-      if (interim && state !== 'speaking') {
-        lastHeard = now();
-        if (state === 'sleeping') wakeUp();
-        if (state === 'idle') setState('listening');
-        caption(interim, 2500);
-      }
+      if (interim) heardInterim(interim);
       if (fin) onHeard(fin.trim());
     };
     r.onerror = (e) => {
@@ -510,12 +569,18 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     return r;
   }
   function startListening() {
-    if (state === 'speaking' || document.hidden) return;
+    if (state === 'speaking' || document.hidden || panel.classList.contains('on')) return;
+    if (vosk.ctx) { vosk.muted = false; vosk.ctx.resume?.(); return; }
     wantListen = true;
     if (!rec || recRunning) return;
     try { rec.start(); recBackoff = 300; } catch { /* já rodando */ }
   }
   function stopListening() {
+    if (vosk.ctx) {
+      // não escuta a própria voz; descarta o que estava no meio
+      if (!vosk.muted && vosk.rec && vosk.open) { vosk.muted = true; vosk.rec.retrieveFinalResult(); }
+      vosk.muted = true; vosk.open = false; return;
+    }
     wantListen = false;
     if (rec && recRunning) { try { rec.abort(); } catch {} }
   }
@@ -587,7 +652,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   function openPanel() {
     $('cfgKey').value = cfg.key; $('cfgName').value = cfg.name; $('cfgModel').value = cfg.model;
     $('cfgRate').value = cfg.rate; $('cfgPitch').value = cfg.pitch; $('cfgSleep').value = cfg.sleepMin;
-    $('cfgNosy').checked = cfg.nosy; $('cfgSpont').checked = cfg.spont; $('cfgCaption').checked = cfg.caption;
+    $('cfgNosy').checked = cfg.nosy; $('cfgSpont').checked = cfg.spont; $('cfgCaption').checked = cfg.caption; $('cfgEar').value = cfg.ear;
     $('rateVal').textContent = cfg.rate; $('pitchVal').textContent = cfg.pitch;
     loadVoices(); panel.classList.add('on'); stopListening();
   }
@@ -595,12 +660,17 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     cfg.key = $('cfgKey').value.trim(); cfg.name = $('cfgName').value.trim() || 'Bit'; cfg.model = $('cfgModel').value;
     cfg.voice = $('cfgVoice').value; cfg.rate = +$('cfgRate').value; cfg.pitch = +$('cfgPitch').value;
     cfg.sleepMin = clamp(+$('cfgSleep').value || 4, 1, 120); cfg.nosy = $('cfgNosy').checked; cfg.spont = $('cfgSpont').checked;
-    cfg.caption = $('cfgCaption').checked;
+    cfg.caption = $('cfgCaption').checked; cfg.ear = $('cfgEar').value;
   }
   gear.addEventListener('click', (e) => { e.stopPropagation(); openPanel(); });
   $('cfgRate').oninput = (e) => ($('rateVal').textContent = e.target.value);
   $('cfgPitch').oninput = (e) => ($('pitchVal').textContent = e.target.value);
-  $('cfgSave').onclick = () => { readPanel(); for (const k in DEFAULTS) store.set(k, cfg[k]); panel.classList.remove('on'); document.title = cfg.name; say('Configurado. Não vou agradecer.', 'cetico'); };
+  $('cfgSave').onclick = () => {
+    const oldEar = cfg.ear;
+    readPanel(); for (const k in DEFAULTS) store.set(k, cfg[k]);
+    if (cfg.ear !== oldEar) { location.reload(); return; } // trocar de ouvido exige recomeçar
+    panel.classList.remove('on'); document.title = cfg.name; say('Configurado. Não vou agradecer.', 'cetico');
+  };
   $('cfgTest').onclick = () => { readPanel(); panel.classList.remove('on'); say(`Oi, eu sou o ${cfg.name}. E não, eu não vou trabalhar de graça.`, 'rindo'); };
   $('cfgForget').onclick = () => { history = []; panel.classList.remove('on'); say('Esqueci tudo. Inclusive quem você é.', 'pensativo'); };
   $('cfgClose').onclick = () => { panel.classList.remove('on'); setState('idle'); startListening(); };
@@ -618,17 +688,31 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   // ---------- Início ----------
   $('start').addEventListener('click', async () => {
     $('start').remove();
+    const ctx = cfg.ear === 'vosk' && window.AudioContext ? createAudioCtx() : null; // tem que nascer dentro do toque
     try { await document.documentElement.requestFullscreen?.({ navigationUI: 'hide' }); } catch {}
     try { await screen.orientation?.lock?.('landscape'); } catch {}
     keepAwake();
     // destrava o TTS com um gesto do usuário (exigência do Chrome)
     if (synth) { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; synth.speak(u); }
-    rec = initRec();
     document.title = cfg.name;
     systemPrompt(''); // aquece formatação de data/idioma (primeira chamada é lenta)
-    if (!rec) { setState('idle'); caption('Este navegador não tem reconhecimento de voz. Use o Chrome.', 10000); return; }
     lastHeard = now();
-    say(cfg.key ? pick(['Ah, você de novo.', 'Tô acordado. Infelizmente.', 'Pronto. O que foi agora?']) : 'Tô sem cérebro. Toca na tela e coloca a chave da API na engrenagem.', cfg.key ? 'cetico' : 'sono');
+    const hello = () => say(cfg.key ? pick(['Ah, você de novo.', 'Tô acordado. Infelizmente.', 'Pronto. O que foi agora?']) : 'Tô sem cérebro. Toca na tela e coloca a chave da API na engrenagem.', cfg.key ? 'cetico' : 'sono');
+    if (ctx) {
+      try {
+        await initVosk(ctx);
+        hello();
+        return;
+      } catch (err) {
+        console.warn('[bit] ouvido offline falhou', err);
+        vosk.ctx = null; statusEl.textContent = '';
+        if (err?.name === 'NotAllowedError') { setState('idle'); caption('Sem permissão de microfone. Libera nas configurações do Chrome.', 10000); return; }
+        caption('Ouvido offline não carregou; usando o do Google.', 6000);
+      }
+    }
+    rec = initRec();
+    if (!rec) { setState('idle'); caption('Este navegador não tem reconhecimento de voz. Use o Chrome.', 10000); return; }
+    hello();
   }, { once: true });
 
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
