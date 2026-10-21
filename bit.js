@@ -488,7 +488,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     caption(text, 2500);
   }
 
-  const vosk = { ctx: null, rec: null, muted: true, open: false, quietMs: 0, floor: 0.002, thr: 0, pre: [], status: '', last: '' };
+  const vosk = { ctx: null, rec: null, muted: true, open: false, quietMs: 0, openMs: 0, floor: 0.002, thr: 0, pre: [], pending: [], status: '', last: '' };
   function loadScript(src) {
     return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
   }
@@ -526,33 +526,46 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     const model = await window.Vosk.createModel(new URL('vosk-pt.tar.gz', location.href).href, -1);
     model.on('error', (m) => { vosk.status = 'erro: ' + (m?.error || '?'); });
     const rec = new model.KaldiRecognizer(16000);
-    rec.on('partialresult', (m) => { const p = m.result?.partial; if (p) vosk.last = p; if (p && !vosk.muted) heardInterim(p); });
-    rec.on('result', (m) => { const t = m.result?.text; if (t) vosk.last = '✔ ' + t; if (t && !vosk.muted) onHeard(t.trim()); });
+    rec.on('partialresult', (m) => {
+      const p = m.result?.partial; if (p) vosk.last = p;
+      if (p && !vosk.muted) heardInterim([...vosk.pending, p].join(' '));
+    });
+    // O Vosk fecha um pedaço a cada pausinha; junta os pedaços e só manda quando a pessoa parar de falar.
+    rec.on('result', (m) => {
+      const t = m.result?.text?.trim(); if (t) vosk.last = '✔ ' + t;
+      if (t && !vosk.muted) { vosk.pending.push(t); flushHeard(); }
+    });
     vosk.rec = rec; vosk.status = `pronto (${ctx.sampleRate} Hz)`;
     if (statusEl.textContent === 'carregando o ouvido…') statusEl.textContent = '';
   }
   // Portão de voz: só manda áudio pro reconhecedor quando passa do barulho de fundo (economiza CPU e bateria).
   function onAudio(input) {
+    flushHeard();
     let sum = 0;
     for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
     const rms = Math.sqrt(sum / input.length);
     window.__bitLevel = rms;
     vosk.peak = Math.max(rms, (vosk.peak || 0) * 0.93); // pico que decai devagar, pra dar pra ler no medidor
-    if (!vosk.rec || vosk.muted) { vosk.open = false; vosk.pre.length = 0; return; }
+    if (!vosk.rec || vosk.muted) { vosk.open = false; vosk.pre.length = 0; vosk.pending = []; return; }
     const chunkMs = (input.length / vosk.ctx.sampleRate) * 1000;
     const data = to16k(input, vosk.ctx.sampleRate);
     if (!vosk.open) vosk.floor = vosk.floor * 0.97 + rms * 0.03; // aprende o ruído do ambiente (ar-condicionado, ventilador)
     const thr = Math.max(0.0015, vosk.floor * 2.5);
     vosk.thr = thr;
-    // histerese: abre no limiar, mas depois de aberto só conta silêncio abaixo de 40% dele
-    // (palavras mais fracas no meio da frase não fecham o portão)
-    if (rms > (vosk.open ? thr * 0.4 : thr)) {
+    // histerese: abre no limiar; aberto, só conta silêncio abaixo de um nível menor
+    // (palavras fracas no meio da frase não fecham), mas acima do ruído de fundo (não fica preso aberto)
+    const closeLvl = Math.max(vosk.floor * 1.6, thr * 0.5);
+    if (rms > (vosk.open ? closeLvl : thr)) {
       if (!vosk.open) { vosk.open = true; for (const p of vosk.pre) feed(p); vosk.pre.length = 0; }
       vosk.quietMs = 0; window.__lastVoiceAt = now();
     } else if (vosk.open) vosk.quietMs += chunkMs;
     if (vosk.open) {
-      feed(data);
-      if (vosk.quietMs > 750) { vosk.open = false; vosk.rec.retrieveFinalResult(); } // 0,75 s de silêncio = acabou a frase
+      feed(data); vosk.openMs += chunkMs;
+      // 0,75 s de silêncio = acabou o trecho; 20 s aberto direto = barulho contínuo, fecha e reaprende o fundo
+      if (vosk.quietMs > 750 || vosk.openMs > 20000) {
+        if (vosk.openMs > 20000) vosk.floor = rms;
+        vosk.open = false; vosk.openMs = 0; vosk.rec.retrieveFinalResult();
+      }
     } else {
       vosk.pre.push(data); // 0,6 s antes da fala, pra não comer o começo
       while (vosk.pre.length > Math.ceil(600 / chunkMs)) vosk.pre.shift();
@@ -570,6 +583,11 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     meterThr.style.left = pct(vosk.thr || 0.0015) + '%';
     meterTxt.textContent = `${vosk.status} · nível ${(vosk.peak || 0).toFixed(4)} / limiar ${(vosk.thr || 0.0015).toFixed(4)}${vosk.muted ? ' · mudo' : ''}${vosk.last ? ' · ' + vosk.last : ''}`;
   }, 100);
+  function flushHeard() {
+    if (!vosk.pending.length || vosk.muted || now() - (window.__lastVoiceAt || 0) < 900) return;
+    const text = vosk.pending.join(' '); vosk.pending = [];
+    onHeard(text);
+  }
   function feed(data) { try { vosk.rec.acceptWaveformFloat(data, 16000); } catch (e) { vosk.status = 'erro ao processar: ' + e.message; } }
 
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
