@@ -1,6 +1,6 @@
 // Cache: abre mesmo com Wi-Fi instável. Arquivos do app: tenta a versão nova primeiro.
 // Ouvido offline (biblioteca + modelo, ~36 MB): baixa uma vez só e fica guardado.
-const CACHE = 'bit-v2';
+const CACHE = 'bit-v3';
 const FILES = ['./', 'index.html', 'bit.js', 'manifest.json', 'icon.png'];
 const BIG = /\/(vosk\.js|vosk-pt\.tar\.gz)$/;
 self.addEventListener('install', (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES))); self.skipWaiting(); });

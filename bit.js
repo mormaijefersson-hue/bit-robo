@@ -530,11 +530,11 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     const thr = Math.max(0.004, vosk.floor * 2.5);
     if (rms > thr) {
       if (!vosk.open) { vosk.open = true; for (const p of vosk.pre) feed(p); vosk.pre.length = 0; }
-      vosk.quietMs = 0;
+      vosk.quietMs = 0; window.__lastVoiceAt = now();
     } else if (vosk.open) vosk.quietMs += chunkMs;
     if (vosk.open) {
       feed(data);
-      if (vosk.quietMs > 1500) { vosk.open = false; vosk.rec.retrieveFinalResult(); }
+      if (vosk.quietMs > 750) { vosk.open = false; vosk.rec.retrieveFinalResult(); } // 0,75 s de silêncio = acabou a frase
     } else {
       vosk.pre.push(data); if (vosk.pre.length > 4) vosk.pre.shift(); // meio segundo antes da fala, pra não comer o começo
     }
