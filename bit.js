@@ -2,7 +2,7 @@
    Rosto em canvas + ouvido (Web Speech API) + cérebro (Claude, streaming) + voz (speechSynthesis). */
 (() => {
   'use strict';
-  const BUILD = '2026-10-21.15'; // mesmo valor em version.txt: o app compara pra avisar que tem versão nova
+  const BUILD = '2026-10-21.16'; // mesmo valor em version.txt: o app compara pra avisar que tem versão nova
 
   // ---------- Config ----------
   const DEFAULTS = {
@@ -383,7 +383,9 @@ ${politica}
 - Entende do negócio: preventiva, PMOC, higienização, BTUs, inverter, precificação, contrato recorrente. Quando o assunto é dinheiro ou cliente, dá a real.
 
 Regras da fala (vai virar voz, então é obrigatório):
-- Português brasileiro falado, coloquial. Respostas CURTAS: 1 a 3 frases, no máximo uns 40 palavras. Só se estenda se pedirem explicação.
+- Português brasileiro falado, coloquial. Respostas CURTÍSSIMAS: no máximo 2 frases curtas, até 25 palavras no total. Responda o que foi dito e pare: sem sermão, sem enrolação, sem listar opções. Só se estenda se pedirem explicação.
+- Quem fala com você é o Jefersson, o dono. NUNCA pergunte quem é nem peça prova de identidade: você não tem acesso a configurações, arquivos nem internet, então não existe o que "autorizar". Trate-o como o chefe de sempre.
+- Se a transcrição parecer cortada ou sem sentido, peça pra repetir em poucas palavras ("repete?", "não peguei"). Não explique problema técnico de microfone.
 - Sem markdown, sem listas, sem emojis, sem asteriscos, sem números de tópico. Escreva números por extenso quando for curto.
 - Comece SEMPRE com UMA tag de expressão entre colchetes: [neutro] [feliz] [rindo] [cetico] [bravo] [triste] [surpreso] [pensativo] [sono]. Pode trocar de tag no meio se a emoção mudar.
 - Você está ouvindo por um microfone num ambiente real; a transcrição pode vir errada ou cortada. Se fizer sentido, interprete; se não, zoe a falta de sentido.
@@ -466,7 +468,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
           'content-type': 'application/json', 'x-api-key': cfg.key, 'anthropic-version': '2023-06-01',
           'anthropic-dangerous-direct-browser-access': 'true',
         },
-        body: JSON.stringify({ model: cfg.model, max_tokens: 300, stream: true, system: systemPrompt(ctxNote), messages: history }),
+        body: JSON.stringify({ model: cfg.model, max_tokens: 220, stream: true, system: systemPrompt(ctxNote), messages: history }),
       });
       if (!res.ok) {
         let msg = ''; try { msg = (await res.json())?.error?.message || ''; } catch {}
@@ -536,7 +538,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     caption(text, 2500);
   }
 
-  const vosk = { log: [], tap: '', deafUntil: 0, ctx: null, rec: null, cloud: false, utt: [], uttMs: 0, voicedMs: 0, muted: true, open: false, quietMs: 0, openMs: 0, floor: 0.002, thr: 0, pre: [], pending: [], status: '', last: '' };
+  const vosk = { log: [], tap: '', deafUntil: 0, ctx: null, rec: null, cloud: false, utt: [], uttMs: 0, voicedMs: 0, muted: true, open: false, quietMs: 0, openMs: 0, floor: 0.0005, thr: 0, pre: [], pending: [], status: '', last: '' };
   function loadScript(src) {
     return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
   }
@@ -653,29 +655,33 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     window.__bitLevel = rms;
     vosk.peak = Math.max(rms, (vosk.peak || 0) * 0.93); // pico que decai devagar, pra dar pra ler no medidor
     // mudo (ela falando) ou "surdo" logo depois: o resto da voz dela no alto-falante/ambiente não pode virar "fala do usuário"
-    if (!(vosk.rec || vosk.cloud) || vosk.muted || now() < vosk.deafUntil) { vosk.open = false; vosk.quietMs = vosk.openMs = 0; vosk.pre.length = 0; vosk.pending = []; vosk.utt = []; vosk.uttMs = vosk.voicedMs = 0; return; }
+    if (!(vosk.rec || vosk.cloud) || vosk.muted || now() < vosk.deafUntil) { vosk.open = false; vosk.recent = 0; vosk.quietMs = vosk.openMs = 0; vosk.pre.length = 0; vosk.pending = []; vosk.utt = []; vosk.uttMs = vosk.voicedMs = 0; return; }
     const chunkMs = (input.length / vosk.ctx.sampleRate) * 1000;
     const data = vosk.cloud ? new Float32Array(input) : to16k(input, vosk.ctx.sampleRate); // nuvem guarda no ritmo nativo e reamostra no fim
     if (!vosk.open) vosk.floor = vosk.floor * 0.97 + rms * 0.03; // aprende o ruído do ambiente (ar-condicionado, ventilador)
-    const thr = Math.max(0.0015, vosk.floor * 2.5);
+    // Limiar de abertura: 3x o ruído de fundo, com piso baixo (microfone fraco/frase que começa baixinho não pode ficar abaixo dele).
+    const thr = Math.max(0.0006, vosk.floor * 3);
     vosk.thr = thr;
-    // histerese: abre no limiar; aberto, só conta silêncio abaixo de um nível menor
-    // (palavras fracas no meio da frase não fecham), mas acima do ruído de fundo (não fica preso aberto)
+    // Abre quando 2 dos últimos 3 blocos (~130 ms) passam do limiar: pega fala fraca e ignora estalo de 1 bloco.
+    vosk.recent = (((vosk.recent || 0) << 1) | (rms > thr ? 1 : 0)) & 7;
+    const hits = (vosk.recent & 1) + ((vosk.recent >> 1) & 1) + ((vosk.recent >> 2) & 1);
+    // histerese: aberto, só conta silêncio abaixo de um nível menor (palavras fracas no meio da frase não fecham),
+    // mas acima do ruído de fundo (não fica preso aberto)
     const closeLvl = Math.max(vosk.floor * 1.6, thr * 0.5);
-    if (rms > (vosk.open ? closeLvl : thr)) {
+    if (vosk.open ? rms > closeLvl : hits >= 2) {
       if (!vosk.open) { vosk.open = true; for (const p of vosk.pre) feed(p); vosk.pre.length = 0; if (vosk.cloud) heardInterim('…'); }
       vosk.quietMs = 0; window.__lastVoiceAt = now(); vosk.voicedMs += chunkMs;
     } else if (vosk.open) vosk.quietMs += chunkMs;
     if (vosk.open) {
       feed(data); vosk.openMs += chunkMs;
-      // 0,75 s de silêncio = acabou o trecho; 20 s aberto direto = barulho contínuo, fecha e reaprende o fundo
-      if (vosk.quietMs > 750 || vosk.openMs > 20000) {
+      // 0,9 s de silêncio = acabou o trecho; 20 s aberto direto = barulho contínuo, fecha e reaprende o fundo
+      if (vosk.quietMs > 900 || vosk.openMs > 20000) {
         if (vosk.openMs > 20000) vosk.floor = rms;
         vosk.open = false; vosk.openMs = 0; vosk.rec?.retrieveFinalResult();
       }
     } else {
-      vosk.pre.push(data); // 0,6 s antes da fala, pra não comer o começo
-      while (vosk.pre.length > Math.ceil(600 / chunkMs)) vosk.pre.shift();
+      vosk.pre.push(data); // 2 s antes de abrir: o começo da frase costuma ser mais baixo que o resto
+      while (vosk.pre.length > Math.ceil(2000 / chunkMs)) vosk.pre.shift();
     }
   }
   // Medidor: barra = volume do microfone (escala log), risco vermelho = ponto em que o portão abre.
@@ -699,9 +705,9 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   }
   // Nuvem: guarda a frase (até 30 s) e manda quando a pessoa fica 0,9 s em silêncio.
   function flushCloud() {
-    if (!vosk.utt.length || vosk.muted || vosk.open || now() - (window.__lastVoiceAt || 0) < 900) return;
+    if (!vosk.utt.length || vosk.muted || vosk.open || now() - (window.__lastVoiceAt || 0) < 1100) return; // 1,1 s: pausa de respirar no meio da frase não corta
     const parts = vosk.utt, voiced = vosk.voicedMs; vosk.utt = []; vosk.uttMs = vosk.voicedMs = 0;
-    if (voiced < 500) { anota(`⌀ curto demais: só ${(voiced / 1000).toFixed(1)} s de voz`); if (state === 'listening') setState(wasSleeping ? 'sleeping' : 'idle'); return; } // estalo/barulho curto
+    if (voiced < 400) { anota(`⌀ curto demais: só ${(voiced / 1000).toFixed(1)} s de voz`); if (state === 'listening') setState(wasSleeping ? 'sleeping' : 'idle'); return; } // estalo/barulho curto
     const n = parts.reduce((t, p) => t + p.length, 0), pcm = new Float32Array(n);
     let o = 0; for (const p of parts) { pcm.set(p, o); o += p.length; }
     const x16 = resample16k(pcm, vosk.ctx.sampleRate);
@@ -733,6 +739,13 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   const segRuim = (g) => (g.no_speech_prob > 0.6 && g.avg_logprob < -1.0) || g.avg_logprob < -1.5 || g.compression_ratio > 2.4;
   // Letras que não existem em português (islandês "ð þ æ", alemão "ä ö", cirílico, CJK…): o Whisper vira "gringo" quando o áudio é ruim.
   const NAO_PT = /[äöëïñåæøðþßœ]|[^\u0000-\u00FF\u2010-\u2027\u20AC]/i;
+  // Vocabulário: o Whisper erra nomes que não conhece ("Jefersson" virou "refeição"). Estilo de conversa, não lista.
+  const promptWhisper = () => `Oi, ${cfg.name}! Aqui é o Jefersson Breno, da Bom Ar Refrigeração. Preciso de uma preventiva no split inverter, em BTUs, PMOC, higienização. Você viu o Lula, o Bolsonaro, o Flávio Bolsonaro?`;
+  // Se o texto é quase só o próprio prompt (alucinação em áudio ruim), descarta; exige muitas palavras pra não pegar fala legítima.
+  function ecoDoPrompt(text) {
+    const w = palavras(text), set = new Set(palavras(promptWhisper()));
+    return w.length >= 6 && w.filter((x) => set.has(x)).length / w.length >= 0.85;
+  }
   async function transcribe(pcm, info = {}) {
     const myTurn = turnId;
     if (now() < stt.coolUntil) { anota('⏸ pausa da cota grátis (1 min)'); if (state === 'listening') setState(wasSleeping ? 'sleeping' : 'idle'); return; } // cota esgotada: espera
@@ -747,7 +760,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
       fd.append('language', 'pt');
       fd.append('temperature', '0');
       fd.append('response_format', 'verbose_json'); // traz a confiança de cada trecho
-      fd.append('prompt', `Conversa em português do Brasil com ${cfg.name}, robô da Bom Ar Refrigeração: ar-condicionado, preventiva, PMOC, higienização, inverter, BTUs.`);
+      fd.append('prompt', promptWhisper());
       return fetch('https://api.groq.com/openai/v1/audio/transcriptions', { method: 'POST', headers: { Authorization: 'Bearer ' + cfg.groqKey }, body: fd });
     };
     try {
@@ -765,6 +778,8 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
         if (bons.length < segs.length) text = bons.map((g) => (g.text || '').trim()).join(' ').trim();
         if (!bons.length) { anota(`✖ incerto: "${(j.text || '').trim()}"${stats}`); if (state === 'thinking') setState(wasSleeping ? 'sleeping' : 'idle'); return; }
       }
+      text = text.replace(/^\s*\d+[.)]\s+/, ''); // "1. Bolsonaro" → "Bolsonaro" (o Whisper às vezes numera)
+      if (ecoDoPrompt(text)) { anota(`✖ repetiu o prompt (áudio ruim): "${text}"${stats}`); if (state === 'thinking') setState(wasSleeping ? 'sleeping' : 'idle'); return; }
       if (NAO_PT.test(text)) { anota(`✖ outro idioma: "${text}"${stats}`); if (state === 'thinking') setState(wasSleeping ? 'sleeping' : 'idle'); return; }
       anota('✔ ' + text + stats);
       if (myTurn !== turnId && state !== 'thinking') return; // algo aconteceu no meio (toque, etc.)
@@ -883,12 +898,18 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   // ---------- Toque ----------
   const gear = $('gear'); let gearTimer = 0;
   const pokes = [['Ei! Isso é meu rosto.', 'bravo'], ['Para de me cutucar.', 'cetico'], ['Que foi? Tô ocupado fingindo que trabalho.', 'sono'], ['Ai.', 'surpreso'], ['Hehe, faz cócegas.', 'rindo']];
-  let pokeCount = 0, pokeReset = 0;
+  let pokeCount = 0, pokeReset = 0, lastTap = 0;
   canvas.addEventListener('pointerdown', () => {
     if (state === 'boot') return;
     gear.classList.add('on'); clearTimeout(gearTimer); gearTimer = setTimeout(() => gear.classList.remove('on'), 3500);
     anim.poke = 1;
-    if (state === 'speaking' || state === 'thinking') { say(pick(['Tá, tá, calei.', 'Ok, ok.', 'Grosso.']), 'cetico'); return; }
+    // Interromper exige TOQUE DUPLO: segurando o celular perto da boca, dedo/palma encostam na tela e cortavam a resposta.
+    if (state === 'speaking' || state === 'thinking') {
+      const dbl = now() - lastTap < 500; lastTap = now();
+      if (dbl) say(pick(['Tá, tá, calei.', 'Ok, ok.', 'Grosso.']), 'cetico');
+      return;
+    }
+    lastTap = now();
     if (state === 'sleeping') { wasSleeping = false; say(pick(['Hã? Que foi? Eu tava acordado.', 'Me deixa dormir mais cinco minutinhos.']), 'sono'); lastHeard = now(); return; }
     clearTimeout(pokeReset); pokeReset = setTimeout(() => (pokeCount = 0), 8000);
     pokeCount++;
