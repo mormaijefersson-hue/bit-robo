@@ -2,7 +2,7 @@
    Rosto em canvas + ouvido (Web Speech API) + cérebro (Claude, streaming) + voz (speechSynthesis). */
 (() => {
   'use strict';
-  const BUILD = '2026-10-21.17'; // mesmo valor em version.txt: o app compara pra avisar que tem versão nova
+  const BUILD = '2026-10-21.18'; // mesmo valor em version.txt: o app compara pra avisar que tem versão nova
 
   // ---------- Config ----------
   const DEFAULTS = {
@@ -401,7 +401,7 @@ Regras da fala (vai virar voz, então é obrigatório):
 - Comece SEMPRE com UMA tag de expressão entre colchetes: [neutro] [feliz] [rindo] [cetico] [bravo] [triste] [surpreso] [pensativo] [sono]. Pode trocar de tag no meio se a emoção mudar.
 - Você está ouvindo por um microfone num ambiente real; a transcrição pode vir errada ou cortada. Se fizer sentido, interprete; se não, zoe a falta de sentido.
 ${cfg.nosy
-    ? `- Você é intromet${a}: comenta o que ouvir mesmo que não falem com você. Mas se for claramente ruído sem sentido (TV, música, palavra solta), responda só [ignorar].`
+    ? `- Você é intromet${a}: comenta o que ouvir mesmo que não falem com você. Use [ignorar] SÓ quando a fala claramente não é pra você (conversa de outras pessoas, TV, música, ruído, palavra solta). NUNCA ignore pergunta, pedido ou ordem, nem quando chamarem o seu nome: responda sempre.`
     : `- Só responda se falarem com você (chamarem "${cfg.name}" ou claramente se dirigirem a você). Caso contrário responda só [ignorar].`}
 
 Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
@@ -461,6 +461,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     }, fx.holdMs);
   }
   async function think(userText, ctxNote = '', opts = {}) {
+    if (opts.direct) ctxNote += (ctxNote ? '\n' : '') + 'Contexto: essa fala é direta com você (chamou pelo nome ou é uma pergunta). Responda; NÃO use [ignorar].';
     if ((opts.waits || 0) >= 2) ctxNote += (ctxNote ? '\n' : '') + 'Contexto: você já esperou a pessoa continuar. Responda agora com o que tem; não use [aguardar].';
     shutUp();
     const id = turnId;
@@ -520,7 +521,19 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
       if (id !== turnId) return;
       clearTimeout(fillerTimer);
       thinkAbort = null;
-      if (ignored || !gotAny) { history.pop(); streamDone = true; if (waited) hold(userText, opts); if (!speaking) { setState('idle'); setTimeout(startListening, 150); } return; }
+      if (ignored || !gotAny) {
+        history.pop(); streamDone = true;
+        if (waited) hold(userText, opts);
+        else if (ignored && opts.direct) { // o cérebro ignorou uma fala direta: não deixa ela muda nem apaga a pergunta do histórico
+          evento('CÉREBRO', '[ignorar] numa fala direta — resposta de segurança');
+          const fb = pick(['Hã? Não peguei direito, repete.', 'Repete aí, chefe, que eu não entendi.', 'Fala de novo, que isso aí eu perdi.']);
+          history.push({ role: 'user', content: userText }, { role: 'assistant', content: fb });
+          enqueueSpeech(fb, 'cetico', id);
+          return;
+        } else if (ignored) evento('CÉREBRO', '[ignorar]');
+        if (!speaking) { setState('idle'); setTimeout(startListening, 150); }
+        return;
+      }
       history.push({ role: 'assistant', content: full.trim() });
       streamDone = true;
       if (!speaking && !speakQ.length) endTurn();
@@ -874,7 +887,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
 
   function addressed(text) {
     const n = cfg.name.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
-    return text.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').includes(n);
+    return new RegExp('\\b' + n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b').test(text.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, ''));
   }
 
   function onHeard(text) {
@@ -893,7 +906,8 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
       return;
     }
     // interjeição só quando a fala é claramente pra ela (evita "hum…" pra ruído em modo intrometido)
-    const filler = addressed(text) || convo || /\?\s*$/.test(text);
+    const direct = addressed(text) || /\?\s*$/.test(text); // chamou pelo nome ou é pergunta: nunca pode ser ignorada
+    const filler = direct || convo;
 
     // frase que ela estava esperando terminar: junta com a continuação
     let waits = 0;
@@ -909,7 +923,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
       text = history.pop().content + ' ' + text;
     }
     evento('PARA O CÉREBRO', text);
-    think(text, note, { filler, waits });
+    think(text, note, { filler, waits, direct });
   }
 
   // ---------- Sono / tédio ----------
