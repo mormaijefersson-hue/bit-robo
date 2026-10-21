@@ -1,0 +1,38 @@
+# Gera áudios de fala natural em português para testar o ouvido offline (vão para o ramo audios-teste).
+name: Audios de teste
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/audios-teste.yml']
+permissions:
+  contents: write
+jobs:
+  gerar:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          pip install -q gTTS
+          sudo apt-get install -y -qq ffmpeg > /dev/null
+          mkdir out && cd out
+          n=1
+          while IFS= read -r frase; do
+            gtts-cli --lang pt --tld com.br "$frase" --output f$n.mp3
+            ffmpeg -loglevel error -i f$n.mp3 -ar 48000 -ac 1 -sample_fmt s16 f$n.wav && rm f$n.mp3
+            echo "f$n.wav|$frase" >> frases.txt
+            n=$((n+1))
+          done <<'FRASES'
+          bom dia tudo bem com você
+          quanto custa uma limpeza de ar condicionado
+          tive uma ideia de fechar contrato de manutenção preventiva
+          que horas são agora
+          me conta uma piada
+          FRASES
+          ls -la
+      - run: |
+          cd out
+          git init -q -b audios-teste
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A && git commit -q -m "Áudios de teste do ouvido"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" audios-teste
