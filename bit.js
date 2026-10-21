@@ -675,7 +675,9 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     if (voiced < 500) { if (state === 'listening') setState(wasSleeping ? 'sleeping' : 'idle'); return; } // estalo/barulho curto
     const n = parts.reduce((t, p) => t + p.length, 0), pcm = new Float32Array(n);
     let o = 0; for (const p of parts) { pcm.set(p, o); o += p.length; }
-    transcribe(normalizePeak(resample16k(pcm, vosk.ctx.sampleRate)));
+    const x16 = resample16k(pcm, vosk.ctx.sampleRate);
+    let peak = 0; for (let i = 0; i < x16.length; i++) { const v = Math.abs(x16[i]); if (v > peak) peak = v; }
+    transcribe(normalizePeak(x16), { secs: x16.length / 16000, peak });
   }
   function wav16k(pcm) {
     const b = new ArrayBuffer(44 + pcm.length * 2), v = new DataView(b);
@@ -696,25 +698,36 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     stt.n++; store.set('stt', { day: stt.day, n: stt.n });
     if (stt.n === 1800) caption('Já usei 1.800 transcrições hoje: perto do limite grátis da Groq.', 8000);
   }
-  async function transcribe(pcm) {
+  // Segmento que o Whisper "inventou": critérios do próprio Whisper (OpenAI) pra descartar trechos sem fala.
+  const segRuim = (g) => (g.no_speech_prob > 0.6 && g.avg_logprob < -1.0) || g.avg_logprob < -1.5 || g.compression_ratio > 2.4;
+  async function transcribe(pcm, info = {}) {
     const myTurn = turnId;
     if (now() < stt.coolUntil) { if (state === 'listening') setState(wasSleeping ? 'sleeping' : 'idle'); return; } // cota esgotada: espera
     sttBump();
     if (state === 'listening' || state === 'idle') setState('thinking');
     const fd = new FormData();
-    fd.append('file', wav16k(pcm), 'fala.wav');
+    const wav = wav16k(pcm); vosk.lastWav = wav; // guardada pra "ouvir o que o microfone captou" (engrenagem)
+    const stats = info.secs ? ` (${info.secs.toFixed(1)} s, pico ${info.peak.toFixed(3)})` : '';
+    fd.append('file', wav, 'fala.wav');
     fd.append('model', 'whisper-large-v3-turbo');
     fd.append('language', 'pt');
     fd.append('temperature', '0');
-    fd.append('response_format', 'json');
+    fd.append('response_format', 'verbose_json'); // traz a confiança de cada trecho
     fd.append('prompt', `Conversa em português do Brasil com ${cfg.name}, robô da Bom Ar Refrigeração: ar-condicionado, preventiva, PMOC, higienização, inverter, BTUs.`);
     try {
       const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
         method: 'POST', headers: { Authorization: 'Bearer ' + cfg.groqKey }, body: fd,
       });
       if (!res.ok) throw Object.assign(new Error('HTTP ' + res.status), { status: res.status });
-      const text = ((await res.json()).text || '').trim();
-      vosk.last = '✔ ' + text;
+      const j = await res.json();
+      let text = (j.text || '').trim();
+      const segs = Array.isArray(j.segments) ? j.segments : [];
+      if (segs.length) { // descarta os trechos de baixa confiança (o Whisper inventa frases em ruído/áudio ruim)
+        const bons = segs.filter((g) => !segRuim(g));
+        if (bons.length < segs.length) text = bons.map((g) => (g.text || '').trim()).join(' ').trim();
+        if (!bons.length) { vosk.last = `✖ ignorado, incerto: "${(j.text || '').trim()}"${stats}`; if (state === 'thinking') setState(wasSleeping ? 'sleeping' : 'idle'); return; }
+      }
+      vosk.last = '✔ ' + text + stats;
       if (myTurn !== turnId && state !== 'thinking') return; // algo aconteceu no meio (toque, etc.)
       if (!text || text.length < 2 || WHISPER_FANTASMA.test(text)) { if (state === 'thinking') setState(wasSleeping ? 'sleeping' : 'idle'); return; }
       onHeard(text);
@@ -868,6 +881,11 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     panel.classList.remove('on'); document.title = cfg.name; say('Configurado. Não vou agradecer.', 'cetico');
   };
   $('cfgTest').onclick = () => { readPanel(); panel.classList.remove('on'); say(`Oi, eu sou o ${cfg.name}. E não, eu não vou trabalhar de graça.`, 'rindo'); };
+  $('cfgPlay').onclick = () => {
+    const b = $('cfgPlay');
+    if (!vosk.lastWav) { b.textContent = 'Ainda não gravei nada (só no ouvido "Nuvem")'; setTimeout(() => (b.textContent = 'Ouvir o que o microfone captou'), 2500); return; }
+    const a = new Audio(URL.createObjectURL(vosk.lastWav)); a.volume = 1; a.play().catch(() => {});
+  };
   $('cfgForget').onclick = () => { history = []; panel.classList.remove('on'); say('Esqueci tudo. Inclusive quem você é.', 'pensativo'); };
   $('cfgClose').onclick = () => { panel.classList.remove('on'); setState('idle'); startListening(); };
 
