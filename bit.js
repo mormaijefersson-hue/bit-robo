@@ -6,7 +6,7 @@
   // ---------- Config ----------
   const DEFAULTS = {
     key: '', name: 'Bit', model: 'claude-haiku-5-5', voice: '', rate: 1.1, pitch: 1.05,
-    sleepMin: 4, nosy: true, spont: false, caption: true, ear: 'vosk',
+    sleepMin: 4, nosy: true, spont: false, caption: true, ear: 'vosk', meter: true,
   };
   const store = {
     get(k, d) { try { const v = localStorage.getItem('bit.' + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
@@ -488,33 +488,46 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     caption(text, 2500);
   }
 
-  const vosk = { ctx: null, rec: null, muted: true, open: false, quietMs: 0, floor: 0.003, pre: [] };
+  const vosk = { ctx: null, rec: null, muted: true, open: false, quietMs: 0, floor: 0.002, thr: 0, pre: [], status: '', last: '' };
   function loadScript(src) {
     return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
   }
   // precisa ser chamado dentro do toque (o Chrome só libera áudio com gesto do usuário)
-  function createAudioCtx() {
-    try { return new AudioContext({ sampleRate: 16000 }); } catch { return new AudioContext(); }
+  function createAudioCtx() { return new AudioContext(); } // taxa nativa: alguns Androids não convertem o microfone
+  // Reamostra pra 16 kHz (taxa do modelo) com média simples; guarda a sobra entre blocos.
+  let rsRest = new Float32Array(0);
+  function to16k(input, rate) {
+    if (rate === 16000) return new Float32Array(input);
+    const buf = new Float32Array(rsRest.length + input.length); buf.set(rsRest); buf.set(input, rsRest.length);
+    const ratio = rate / 16000, n = Math.floor(buf.length / ratio), out = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const a = Math.floor(i * ratio), b = Math.max(a + 1, Math.floor((i + 1) * ratio));
+      let sum = 0; for (let j = a; j < b; j++) sum += buf[j];
+      out[i] = sum / (b - a);
+    }
+    rsRest = buf.slice(Math.floor(n * ratio));
+    return out;
   }
   async function initVosk(ctx) {
     vosk.ctx = ctx;
     // sem cancelamento de eco: com ele ligado o Android entra em "modo chamada" e a voz do robô sai baixa
     const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 },
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true, channelCount: 1 },
     });
     const src = ctx.createMediaStreamSource(stream);
     const node = ctx.createScriptProcessor(2048, 1, 1);
     // ligado na saída (em silêncio): o processador só roda assim, e os botões de volume passam a controlar a mídia
     src.connect(node); node.connect(ctx.destination);
     node.onaudioprocess = (e) => { e.outputBuffer.getChannelData(0).fill(0); onAudio(e.inputBuffer.getChannelData(0)); };
-    vosk.node = node; vosk.stream = stream;
+    vosk.node = node; vosk.stream = stream; vosk.status = 'baixando/abrindo modelo…';
     statusEl.textContent = 'carregando o ouvido…';
     await loadScript('vosk.js');
     const model = await window.Vosk.createModel(new URL('vosk-pt.tar.gz', location.href).href, -1);
-    const rec = new model.KaldiRecognizer(ctx.sampleRate);
-    rec.on('partialresult', (m) => { const p = m.result?.partial; if (p && !vosk.muted) heardInterim(p); });
-    rec.on('result', (m) => { const t = m.result?.text; if (t && !vosk.muted) onHeard(t.trim()); });
-    vosk.rec = rec;
+    model.on('error', (m) => { vosk.status = 'erro: ' + (m?.error || '?'); });
+    const rec = new model.KaldiRecognizer(16000);
+    rec.on('partialresult', (m) => { const p = m.result?.partial; if (p) vosk.last = p; if (p && !vosk.muted) heardInterim(p); });
+    rec.on('result', (m) => { const t = m.result?.text; if (t) vosk.last = '✔ ' + t; if (t && !vosk.muted) onHeard(t.trim()); });
+    vosk.rec = rec; vosk.status = `pronto (${ctx.sampleRate} Hz)`;
     if (statusEl.textContent === 'carregando o ouvido…') statusEl.textContent = '';
   }
   // Portão de voz: só manda áudio pro reconhecedor quando passa do barulho de fundo (economiza CPU e bateria).
@@ -525,9 +538,10 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     window.__bitLevel = rms;
     if (!vosk.rec || vosk.muted) { vosk.open = false; vosk.pre.length = 0; return; }
     const chunkMs = (input.length / vosk.ctx.sampleRate) * 1000;
-    const data = new Float32Array(input);
+    const data = to16k(input, vosk.ctx.sampleRate);
     if (!vosk.open) vosk.floor = vosk.floor * 0.97 + rms * 0.03; // aprende o ruído do ambiente (ar-condicionado, ventilador)
-    const thr = Math.max(0.004, vosk.floor * 2.5);
+    const thr = Math.max(0.0015, vosk.floor * 2.5);
+    vosk.thr = thr;
     if (rms > thr) {
       if (!vosk.open) { vosk.open = true; for (const p of vosk.pre) feed(p); vosk.pre.length = 0; }
       vosk.quietMs = 0; window.__lastVoiceAt = now();
@@ -536,10 +550,23 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
       feed(data);
       if (vosk.quietMs > 750) { vosk.open = false; vosk.rec.retrieveFinalResult(); } // 0,75 s de silêncio = acabou a frase
     } else {
-      vosk.pre.push(data); if (vosk.pre.length > 4) vosk.pre.shift(); // meio segundo antes da fala, pra não comer o começo
+      vosk.pre.push(data); // 0,6 s antes da fala, pra não comer o começo
+      while (vosk.pre.length > Math.ceil(600 / chunkMs)) vosk.pre.shift();
     }
   }
-  function feed(data) { try { vosk.rec.acceptWaveformFloat(data, vosk.ctx.sampleRate); } catch {} }
+  // Medidor: barra = volume do microfone (escala log), risco vermelho = ponto em que o portão abre.
+  const meterEl = $('meter'), meterLvl = meterEl.querySelector('.lvl'), meterThr = meterEl.querySelector('.thr'), meterTxt = meterEl.querySelector('.txt');
+  const pct = (v) => clamp((Math.log10(Math.max(v, 1e-4)) + 4) / 4 * 100, 0, 100); // 0,0001 → 0%, 1 → 100%
+  setInterval(() => {
+    const on = cfg.meter && vosk.ctx && state !== 'boot';
+    meterEl.classList.toggle('on', !!on);
+    if (!on) return;
+    meterLvl.style.width = pct(window.__bitLevel || 0) + '%';
+    meterLvl.classList.toggle('open', vosk.open);
+    meterThr.style.left = pct(vosk.thr || 0.0015) + '%';
+    meterTxt.textContent = `${vosk.status}${vosk.muted ? ' · mudo' : ''}${vosk.last ? ' · ' + vosk.last : ''}`;
+  }, 100);
+  function feed(data) { try { vosk.rec.acceptWaveformFloat(data, 16000); } catch (e) { vosk.status = 'erro ao processar: ' + e.message; } }
 
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   let rec = null, wantListen = false, recRunning = false, recBackoff = 300;
@@ -652,7 +679,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   function openPanel() {
     $('cfgKey').value = cfg.key; $('cfgName').value = cfg.name; $('cfgModel').value = cfg.model;
     $('cfgRate').value = cfg.rate; $('cfgPitch').value = cfg.pitch; $('cfgSleep').value = cfg.sleepMin;
-    $('cfgNosy').checked = cfg.nosy; $('cfgSpont').checked = cfg.spont; $('cfgCaption').checked = cfg.caption; $('cfgEar').value = cfg.ear;
+    $('cfgNosy').checked = cfg.nosy; $('cfgSpont').checked = cfg.spont; $('cfgCaption').checked = cfg.caption; $('cfgEar').value = cfg.ear; $('cfgMeter').checked = cfg.meter;
     $('rateVal').textContent = cfg.rate; $('pitchVal').textContent = cfg.pitch;
     loadVoices(); panel.classList.add('on'); stopListening();
   }
@@ -660,7 +687,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     cfg.key = $('cfgKey').value.trim(); cfg.name = $('cfgName').value.trim() || 'Bit'; cfg.model = $('cfgModel').value;
     cfg.voice = $('cfgVoice').value; cfg.rate = +$('cfgRate').value; cfg.pitch = +$('cfgPitch').value;
     cfg.sleepMin = clamp(+$('cfgSleep').value || 4, 1, 120); cfg.nosy = $('cfgNosy').checked; cfg.spont = $('cfgSpont').checked;
-    cfg.caption = $('cfgCaption').checked; cfg.ear = $('cfgEar').value;
+    cfg.caption = $('cfgCaption').checked; cfg.ear = $('cfgEar').value; cfg.meter = $('cfgMeter').checked;
   }
   gear.addEventListener('click', (e) => { e.stopPropagation(); openPanel(); });
   $('cfgRate').oninput = (e) => ($('rateVal').textContent = e.target.value);
@@ -705,6 +732,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
         return;
       } catch (err) {
         console.warn('[bit] ouvido offline falhou', err);
+        vosk.status = 'falhou: ' + (err?.message || err);
         vosk.ctx = null; statusEl.textContent = '';
         if (err?.name === 'NotAllowedError') { setState('idle'); caption('Sem permissão de microfone. Libera nas configurações do Chrome.', 10000); return; }
         caption('Ouvido offline não carregou; usando o do Google.', 6000);
