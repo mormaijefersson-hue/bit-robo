@@ -715,7 +715,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     hello();
   }, { once: true });
 
-  if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+  if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('sw.js').catch(() => {});
 
   // ganchos pra teste automatizado
   window.__bit = { setExpr, setState, think, onHeard, goSleep, cfg, vosk, get state() { return state; }, get history() { return history; } };
