@@ -2,7 +2,7 @@
    Rosto em canvas + ouvido (Web Speech API) + cérebro (Claude, streaming) + voz (speechSynthesis). */
 (() => {
   'use strict';
-  const BUILD = '2026-10-21.16'; // mesmo valor em version.txt: o app compara pra avisar que tem versão nova
+  const BUILD = '2026-10-21.17'; // mesmo valor em version.txt: o app compara pra avisar que tem versão nova
 
   // ---------- Config ----------
   const DEFAULTS = {
@@ -258,6 +258,12 @@
     clearTimeout(capTimer); capTimer = setTimeout(() => capEl.classList.remove('on'), ms);
   }
 
+  // Registro completo (últimos ~80 eventos) pra "Copiar registro": o que o ouvido entregou/descartou, o que foi pro cérebro, o que ela disse.
+  const registro = [];
+  function evento(quem, msg) {
+    const d = new Date(), hh = [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, '0')).join(':');
+    registro.push(`${hh} ${quem}: ${msg}`); if (registro.length > 80) registro.shift();
+  }
   // ---------- Voz (TTS) ----------
   const synth = window.speechSynthesis;
   let voices = [];
@@ -283,7 +289,7 @@
   const speakQ = [];               // [{text, expr}]
   let speaking = false, streamDone = true, turnId = 0, uSerial = 0;
   // Interjeição enquanto o cérebro pensa ("hum…", "pera aí…"): disfarça a pausa, como gente faz.
-  const fx = { chance: 0.7, delay: 600 };
+  const fx = { chance: 0.7, delay: 600, holdMs: 8000 };
   const FILLERS = ['Hum…', 'Então…', 'Deixa eu ver…', 'Pera aí…', 'Bom…'];
   let fillerTimer = 0, lastFiller = '', lastReplyAt = 0;
   function enqueueSpeech(text, expr, id, filler = false) {
@@ -313,6 +319,7 @@
     if (item.id !== turnId) return speakNext();
     speaking = true;
     said.push({ t: now(), words: palavras(item.text) }); while (said.length > 8) said.shift();
+    evento('ELA', item.text);
     const my = ++uSerial;
     stopListening();
     setState('speaking');
@@ -339,7 +346,9 @@
   function endTurn() {
     exprHold = now() + 1800; // segura a última expressão um pouco
     lastReplyAt = now();
-    vosk.deafUntil = now() + 900; // o som dela ainda "sobra" na sala por um instante depois do fim da fala
+    // O som dela "sobra" na sala por um instante depois do fim da fala. Surda só 0,35 s (gente começa a responder ~0,3 s depois
+    // do outro parar) e, por mais 1,2 s, exige um som bem mais forte pra abrir: o eco dela (fraco) não abre, a sua voz sim.
+    vosk.deafUntil = now() + 350; vosk.raisedUntil = now() + 1550;
     setState('idle');
     lastHeard = now();
     setTimeout(startListening, 250);
@@ -385,7 +394,9 @@ ${politica}
 Regras da fala (vai virar voz, então é obrigatório):
 - Português brasileiro falado, coloquial. Respostas CURTÍSSIMAS: no máximo 2 frases curtas, até 25 palavras no total. Responda o que foi dito e pare: sem sermão, sem enrolação, sem listar opções. Só se estenda se pedirem explicação.
 - Quem fala com você é o Jefersson, o dono. NUNCA pergunte quem é nem peça prova de identidade: você não tem acesso a configurações, arquivos nem internet, então não existe o que "autorizar". Trate-o como o chefe de sempre.
-- Se a transcrição parecer cortada ou sem sentido, peça pra repetir em poucas palavras ("repete?", "não peguei"). Não explique problema técnico de microfone.
+- Frase CLARAMENTE cortada no meio (começou uma pergunta ou conta e parou, ex.: "Quando a gente vai no mercado fazer uma compra."): responda SÓ [aguardar] e espere o Jefersson continuar. Nunca use [aguardar] em pergunta ou afirmação que já tem sentido completo.
+- Pergunta direta (conta de cabeça, fato, "quanto custa X"): RESPONDA direto e curto, mesmo que seja simples; o deboche vem depois da resposta. Nunca devolva "termina a ideia" ou "fala de novo" pra pergunta que já faz sentido.
+- Só se o que ouviu não faz sentido nenhum (ruído, palavras soltas), diga "não peguei" em poucas palavras. Não explique problema técnico de microfone.
 - Sem markdown, sem listas, sem emojis, sem asteriscos, sem números de tópico. Escreva números por extenso quando for curto.
 - Comece SEMPRE com UMA tag de expressão entre colchetes: [neutro] [feliz] [rindo] [cetico] [bravo] [triste] [surpreso] [pensativo] [sono]. Pode trocar de tag no meio se a emoção mudar.
 - Você está ouvindo por um microfone num ambiente real; a transcrição pode vir errada ou cortada. Se fizer sentido, interprete; se não, zoe a falta de sentido.
@@ -408,8 +419,8 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     function emit(piece) {
       // extrai tags [x] e aplica na frase
       let expr = null;
-      piece = piece.replace(/\[([^\]]{1,20})\]/g, (_, tag) => { const n = exprName(tag); if (tag.toLowerCase().includes('ignorar')) expr = 'IGNORE'; else if (n) expr = n; return ' '; });
-      if (expr === 'IGNORE') { onChunk(null, 'IGNORE'); return; }
+      piece = piece.replace(/\[([^\]]{1,20})\]/g, (_, tag) => { const n = exprName(tag); if (tag.toLowerCase().includes('ignorar')) expr = 'IGNORE'; else if (/aguardar|esperar/i.test(tag)) expr = 'WAIT'; else if (n) expr = n; return ' '; });
+      if (expr === 'IGNORE' || expr === 'WAIT') { onChunk(null, expr); return; }
       if (expr) curExpr = expr;
       piece = piece.replace(/[*_#`~>]/g, '').replace(/\s+/g, ' ').trim();
       if (piece) onChunk(piece, expr || (first ? curExpr : null));
@@ -434,7 +445,23 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     };
   }
 
+  // Frase cortada no meio: o cérebro responde [aguardar] e ela espera você continuar, em vez de responder meia frase.
+  let held = null, holdTimer = 0;
+  function hold(text, opts) {
+    const waits = (opts.waits || 0) + 1;
+    if (waits > 2) { anota('… esperei demais, desisti'); return; } // nunca espera pra sempre
+    held = { text, at: now(), waits };
+    anota(`… esperando você terminar: "${text}"`);
+    setExpr('ouvindo', 6000);
+    clearTimeout(holdTimer);
+    holdTimer = setTimeout(() => { // você parou de verdade: reage em vez de ficar muda
+      if (!held || state === 'speaking' || state === 'thinking') return;
+      const h = held; held = null;
+      think(h.text, 'Contexto: você esperou a pessoa terminar a frase e ela não continuou. Reaja curto: complete com o que entendeu ou pergunte "e aí?". Não use [aguardar].', { waits: 99 });
+    }, fx.holdMs);
+  }
   async function think(userText, ctxNote = '', opts = {}) {
+    if ((opts.waits || 0) >= 2) ctxNote += (ctxNote ? '\n' : '') + 'Contexto: você já esperou a pessoa continuar. Responda agora com o que tem; não use [aguardar].';
     shutUp();
     const id = turnId;
     streamDone = false;
@@ -454,9 +481,10 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     }
 
     const ac = new AbortController(); thinkAbort = ac;
-    let full = '', ignored = false, gotAny = false;
+    let full = '', ignored = false, gotAny = false, waited = false;
     const chunker = makeChunker((piece, expr) => {
       if (expr === 'IGNORE') { ignored = true; return; }
+      if (expr === 'WAIT') { waited = true; ignored = true; return; }
       if (ignored) return;
       gotAny = true;
       enqueueSpeech(piece, expr, id);
@@ -492,7 +520,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
       if (id !== turnId) return;
       clearTimeout(fillerTimer);
       thinkAbort = null;
-      if (ignored || !gotAny) { history.pop(); streamDone = true; if (!speaking) { setState('idle'); setTimeout(startListening, 150); } return; }
+      if (ignored || !gotAny) { history.pop(); streamDone = true; if (waited) hold(userText, opts); if (!speaking) { setState('idle'); setTimeout(startListening, 150); } return; }
       history.push({ role: 'assistant', content: full.trim() });
       streamDone = true;
       if (!speaking && !speakQ.length) endTurn();
@@ -538,7 +566,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     caption(text, 2500);
   }
 
-  const vosk = { log: [], tap: '', deafUntil: 0, ctx: null, rec: null, cloud: false, utt: [], uttMs: 0, voicedMs: 0, muted: true, open: false, quietMs: 0, openMs: 0, floor: 0.0005, thr: 0, pre: [], pending: [], status: '', last: '' };
+  const vosk = { log: [], tap: '', deafUntil: 0, raisedUntil: 0, ctx: null, rec: null, cloud: false, utt: [], uttMs: 0, voicedMs: 0, muted: true, open: false, quietMs: 0, openMs: 0, floor: 0.0005, thr: 0, pre: [], pending: [], status: '', last: '' };
   function loadScript(src) {
     return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
   }
@@ -658,16 +686,19 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     if (!(vosk.rec || vosk.cloud) || vosk.muted || now() < vosk.deafUntil) { vosk.open = false; vosk.recent = 0; vosk.quietMs = vosk.openMs = 0; vosk.pre.length = 0; vosk.pending = []; vosk.utt = []; vosk.uttMs = vosk.voicedMs = 0; return; }
     const chunkMs = (input.length / vosk.ctx.sampleRate) * 1000;
     const data = vosk.cloud ? new Float32Array(input) : to16k(input, vosk.ctx.sampleRate); // nuvem guarda no ritmo nativo e reamostra no fim
-    if (!vosk.open) vosk.floor = vosk.floor * 0.97 + rms * 0.03; // aprende o ruído do ambiente (ar-condicionado, ventilador)
     // Limiar de abertura: 3x o ruído de fundo, com piso baixo (microfone fraco/frase que começa baixinho não pode ficar abaixo dele).
-    const thr = Math.max(0.0006, vosk.floor * 3);
+    const thrBase = Math.max(0.0006, vosk.floor * 3);
+    // Aprende o ruído do ambiente (ar-condicionado, ventilador) só do que está ABAIXO do limiar. Acima dele (fala, barulho) o fundo
+    // só sobe devagar (~30 s): senão a sua voz fraca seria "aprendida" como ruído e o limiar subiria atrás dela.
+    if (!vosk.open) vosk.floor = rms <= thrBase ? vosk.floor * 0.97 + rms * 0.03 : vosk.floor + (rms - vosk.floor) * 0.0015;
+    const thr = thrBase * (now() < vosk.raisedUntil ? 3 : 1);
     vosk.thr = thr;
     // Abre quando 2 dos últimos 3 blocos (~130 ms) passam do limiar: pega fala fraca e ignora estalo de 1 bloco.
     vosk.recent = (((vosk.recent || 0) << 1) | (rms > thr ? 1 : 0)) & 7;
     const hits = (vosk.recent & 1) + ((vosk.recent >> 1) & 1) + ((vosk.recent >> 2) & 1);
     // histerese: aberto, só conta silêncio abaixo de um nível menor (palavras fracas no meio da frase não fecham),
     // mas acima do ruído de fundo (não fica preso aberto)
-    const closeLvl = Math.max(vosk.floor * 1.6, thr * 0.5);
+    const closeLvl = Math.max(vosk.floor * 1.6, thrBase * 0.5);
     if (vosk.open ? rms > closeLvl : hits >= 2) {
       if (!vosk.open) { vosk.open = true; for (const p of vosk.pre) feed(p); vosk.pre.length = 0; if (vosk.cloud) heardInterim('…'); }
       vosk.quietMs = 0; window.__lastVoiceAt = now(); vosk.voicedMs += chunkMs;
@@ -734,7 +765,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     if (stt.n === 1800) caption('Já usei 1.800 transcrições hoje: perto do limite grátis da Groq.', 8000);
   }
   // Histórico curto das últimas falas (aparece no medidor): mostra em que etapa cada fala morreu ou deu certo.
-  function anota(msg) { vosk.last = msg; vosk.log.unshift(msg); if (vosk.log.length > 4) vosk.log.length = 4; }
+  function anota(msg) { vosk.last = msg; vosk.log.unshift(msg); if (vosk.log.length > 4) vosk.log.length = 4; evento('OUVIDO', msg); }
   // Segmento que o Whisper "inventou": critérios do próprio Whisper (OpenAI) pra descartar trechos sem fala.
   const segRuim = (g) => (g.no_speech_prob > 0.6 && g.avg_logprob < -1.0) || g.avg_logprob < -1.5 || g.compression_ratio > 2.4;
   // Letras que não existem em português (islandês "ð þ æ", alemão "ä ö", cirílico, CJK…): o Whisper vira "gringo" quando o áudio é ruim.
@@ -864,6 +895,10 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     // interjeição só quando a fala é claramente pra ela (evita "hum…" pra ruído em modo intrometido)
     const filler = addressed(text) || convo || /\?\s*$/.test(text);
 
+    // frase que ela estava esperando terminar: junta com a continuação
+    let waits = 0;
+    if (held && now() - held.at < 25e3) { text = held.text + ' ' + text; waits = held.waits; }
+    held = null; clearTimeout(holdTimer);
     let note = '';
     if (state === 'sleeping' || wasSleeping) {
       note = 'Contexto: você estava cochilando e acabou de ser acordado por essa fala. Reclame rapidinho de ter sido acordado e depois responda.';
@@ -873,7 +908,8 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     if (state === 'thinking' && thinkAbort && history.length && history[history.length - 1].role === 'user') {
       text = history.pop().content + ' ' + text;
     }
-    think(text, note, { filler });
+    evento('PARA O CÉREBRO', text);
+    think(text, note, { filler, waits });
   }
 
   // ---------- Sono / tédio ----------
@@ -943,6 +979,12 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     panel.classList.remove('on'); document.title = cfg.name; say('Configurado. Não vou agradecer.', 'cetico');
   };
   $('cfgTest').onclick = () => { readPanel(); panel.classList.remove('on'); say(`Oi, eu sou o ${cfg.name}. E não, eu não vou trabalhar de graça.`, 'rindo'); };
+  $('cfgLog').onclick = async () => {
+    const b = $('cfgLog'), txt = `Bit v${BUILD.split('.')[1]} · ${new Date().toLocaleString('pt-BR')}\n` + (registro.join('\n') || '(vazio)');
+    try { await navigator.clipboard.writeText(txt); b.textContent = 'Copiado! Cole no chat'; }
+    catch { const ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta); ta.select(); try { document.execCommand('copy'); b.textContent = 'Copiado! Cole no chat'; } catch { b.textContent = 'Não consegui copiar'; } ta.remove(); }
+    setTimeout(() => (b.textContent = 'Copiar registro da conversa'), 3000);
+  };
   $('cfgPlay').onclick = () => {
     const b = $('cfgPlay');
     if (!vosk.lastWav) { b.textContent = 'Ainda não gravei nada (só no ouvido "Nuvem")'; setTimeout(() => (b.textContent = 'Ouvir o que o microfone captou'), 2500); return; }
@@ -1016,7 +1058,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('sw.js').catch(() => {});
 
   // ganchos pra teste automatizado
-  window.__bit = { setExpr, setState, think, onHeard, goSleep, cfg, vosk, fx, stt, isEcho, NAO_PT, onAudio, said, anota, resample16k, to16k, normalizePeak, get state() { return state; }, get history() { return history; } };
+  window.__bit = { setExpr, setState, think, onHeard, goSleep, cfg, vosk, fx, stt, endTurn, registro, heldNow: () => held, isEcho, NAO_PT, onAudio, said, anota, resample16k, to16k, normalizePeak, get state() { return state; }, get history() { return history; } };
 
   setState('boot'); setExpr('feliz');
   requestAnimationFrame(frame);
