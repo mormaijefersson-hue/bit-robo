@@ -108,6 +108,15 @@
       <input id="cfgGroq" type="password" autocomplete="off" placeholder="gsk_...">
       <small>Crie grátis em console.groq.com → API Keys. Sem chave, ele usa o ouvido offline.</small>
     </label>
+    <label>Sensibilidade do microfone
+      <select id="cfgGain">
+        <option value="1">Normal</option>
+        <option value="2">Alta (2x)</option>
+        <option value="4">Muito alta (4x)</option>
+        <option value="8">Máxima (8x) — pra falar de longe</option>
+      </select>
+      <small>Se a barra do medidor não passa do risco vermelho quando você fala normal, suba aqui. Quem precisa gritar deve começar pelo 4x.</small>
+    </label>
     <label>Microfone
       <select id="cfgMic">
         <option value="voz">Voz (processado pelo Android — recomendado)</option>

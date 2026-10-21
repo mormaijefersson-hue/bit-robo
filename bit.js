@@ -6,7 +6,7 @@
   // ---------- Config ----------
   const DEFAULTS = {
     key: '', name: 'Bit', model: 'claude-haiku-5-5', voice: '', rate: 1.1, pitch: 1.05,
-    sleepMin: 4, nosy: true, spont: false, caption: true, ear: 'nuvem', groqKey: '', filler: true, meter: true, mic: 'voz', fem: true, swear: 'liberado', politica: 'bolsonarista',
+    sleepMin: 4, nosy: true, spont: false, caption: true, ear: 'nuvem', groqKey: '', filler: true, gain: 1, meter: true, mic: 'voz', fem: true, swear: 'liberado', politica: 'bolsonarista',
   };
   const store = {
     get(k, d) { try { const v = localStorage.getItem('bit.' + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
@@ -542,6 +542,44 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     rsRest = buf.slice(Math.floor(n * ratio));
     return out;
   }
+  // Reamostragem de qualidade pra 16 kHz (modo nuvem): filtro passa-baixa (sinc + janela de Blackman) antes de
+  // descartar amostras. A média simples de cima deixa os agudos do "s", "f", "x" (acima de 8 kHz) "dobrarem"
+  // pra dentro da faixa da voz e borra as consoantes.
+  function resample16k(x, rate) {
+    if (rate === 16000) return x;
+    const ratio = rate / 16000, n = Math.floor(x.length / ratio), out = new Float32Array(n);
+    const fc = 7200 / rate, taps = Math.round(5.5 / ((8800 - 7200) / rate)) | 1, half = (taps - 1) / 2;
+    const h = (d) => { // d em amostras de entrada, simétrico
+      d = Math.abs(d); if (d >= half) return 0;
+      const a = d / half, w = 0.42 + 0.5 * Math.cos(Math.PI * a) + 0.08 * Math.cos(2 * Math.PI * a);
+      return (d === 0 ? 2 * fc : Math.sin(2 * Math.PI * fc * d) / (Math.PI * d)) * w;
+    };
+    if (Number.isInteger(ratio)) { // caso comum (48 kHz → 16 kHz): pesos fixos, rápido
+      const wt = new Float32Array(taps); for (let k = 0; k < taps; k++) wt[k] = h(k - half);
+      for (let i = 0; i < n; i++) {
+        const c = i * ratio; let acc = 0;
+        const k0 = Math.max(0, c - half), k1 = Math.min(x.length - 1, c + half);
+        for (let k = k0; k <= k1; k++) acc += x[k] * wt[k - c + half];
+        out[i] = acc;
+      }
+    } else { // 44,1 kHz etc.: pesos tabelados em 256 sub-posições por amostra (erro < -50 dB), sem seno por amostra
+      const OS = 256, tab = new Float32Array((half + 2) * OS); for (let j = 0; j < tab.length; j++) tab[j] = h(j / OS);
+      for (let i = 0; i < n; i++) {
+        const t = i * ratio, c = Math.floor(t); let acc = 0;
+        const k0 = Math.max(0, c - half), k1 = Math.min(x.length - 1, c + half);
+        for (let k = k0; k <= k1; k++) { const d = t - k; acc += x[k] * tab[((d < 0 ? -d : d) * OS + 0.5) | 0]; }
+        out[i] = acc;
+      }
+    }
+    return out;
+  }
+  // Fala fraca chega com poucos níveis de 16 bits; sobe o volume (até 12x) pra o pico ficar em ~0,5.
+  function normalizePeak(x) {
+    let peak = 0; for (let i = 0; i < x.length; i++) { const v = Math.abs(x[i]); if (v > peak) peak = v; }
+    const g = peak > 0 ? clamp(0.5 / peak, 1, 12) : 1;
+    if (g > 1) for (let i = 0; i < x.length; i++) x[i] *= g;
+    return x;
+  }
   async function initMic(ctx) {
     vosk.ctx = ctx;
     // 'voz': processamento de voz do Android (ganho, ruído, eco). 'bruto': sem processamento — no S8 chega quase mudo.
@@ -580,6 +618,8 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   // Portão de voz: só manda áudio pro reconhecedor quando passa do barulho de fundo (economiza CPU e bateria).
   function onAudio(input) {
     flushHeard();
+    // ganho do microfone (config): pra quem precisa gritar. Aplicado antes do portão de voz e do que vai pro reconhecedor.
+    if (cfg.gain > 1) { const g = new Float32Array(input.length); for (let i = 0; i < g.length; i++) g[i] = clamp(input[i] * cfg.gain, -1, 1); input = g; }
     let sum = 0;
     for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
     const rms = Math.sqrt(sum / input.length);
@@ -587,7 +627,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     vosk.peak = Math.max(rms, (vosk.peak || 0) * 0.93); // pico que decai devagar, pra dar pra ler no medidor
     if (!(vosk.rec || vosk.cloud) || vosk.muted) { vosk.open = false; vosk.pre.length = 0; vosk.pending = []; vosk.utt = []; vosk.uttMs = vosk.voicedMs = 0; return; }
     const chunkMs = (input.length / vosk.ctx.sampleRate) * 1000;
-    const data = to16k(input, vosk.ctx.sampleRate);
+    const data = vosk.cloud ? new Float32Array(input) : to16k(input, vosk.ctx.sampleRate); // nuvem guarda no ritmo nativo e reamostra no fim
     if (!vosk.open) vosk.floor = vosk.floor * 0.97 + rms * 0.03; // aprende o ruído do ambiente (ar-condicionado, ventilador)
     const thr = Math.max(0.0015, vosk.floor * 2.5);
     vosk.thr = thr;
@@ -635,7 +675,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     if (voiced < 500) { if (state === 'listening') setState(wasSleeping ? 'sleeping' : 'idle'); return; } // estalo/barulho curto
     const n = parts.reduce((t, p) => t + p.length, 0), pcm = new Float32Array(n);
     let o = 0; for (const p of parts) { pcm.set(p, o); o += p.length; }
-    transcribe(pcm);
+    transcribe(normalizePeak(resample16k(pcm, vosk.ctx.sampleRate)));
   }
   function wav16k(pcm) {
     const b = new ArrayBuffer(44 + pcm.length * 2), v = new DataView(b);
@@ -687,7 +727,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     }
   }
   function feed(data) {
-    if (vosk.cloud) { if (vosk.uttMs < 30000) { vosk.utt.push(data); vosk.uttMs += data.length / 16; } return; }
+    if (vosk.cloud) { if (vosk.uttMs < 30000) { vosk.utt.push(data); vosk.uttMs += data.length / (vosk.ctx.sampleRate / 1000); } return; }
     try { vosk.rec.acceptWaveformFloat(data, 16000); } catch (e) { vosk.status = 'erro ao processar: ' + e.message; } }
 
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -808,7 +848,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   function openPanel() {
     $('cfgKey').value = cfg.key; $('cfgName').value = cfg.name; $('cfgModel').value = cfg.model;
     $('cfgRate').value = cfg.rate; $('cfgPitch').value = cfg.pitch; $('cfgSleep').value = cfg.sleepMin;
-    $('cfgNosy').checked = cfg.nosy; $('cfgSpont').checked = cfg.spont; $('cfgCaption').checked = cfg.caption; $('cfgEar').value = cfg.ear; $('cfgGroq').value = cfg.groqKey; $('cfgFiller').checked = cfg.filler; $('cfgMeter').checked = cfg.meter; $('cfgMic').value = cfg.mic; $('cfgFem').value = cfg.fem ? '1' : '0'; $('cfgSwear').value = cfg.swear; $('cfgPolitica').value = cfg.politica;
+    $('cfgNosy').checked = cfg.nosy; $('cfgSpont').checked = cfg.spont; $('cfgCaption').checked = cfg.caption; $('cfgEar').value = cfg.ear; $('cfgGroq').value = cfg.groqKey; $('cfgFiller').checked = cfg.filler; $('cfgGain').value = String(cfg.gain); $('cfgMeter').checked = cfg.meter; $('cfgMic').value = cfg.mic; $('cfgFem').value = cfg.fem ? '1' : '0'; $('cfgSwear').value = cfg.swear; $('cfgPolitica').value = cfg.politica;
     $('rateVal').textContent = cfg.rate; $('pitchVal').textContent = cfg.pitch;
     loadVoices(); panel.classList.add('on'); stopListening();
   }
@@ -816,7 +856,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
     cfg.key = $('cfgKey').value.trim(); cfg.name = $('cfgName').value.trim() || 'Bit'; cfg.model = $('cfgModel').value;
     cfg.voice = $('cfgVoice').value; cfg.rate = +$('cfgRate').value; cfg.pitch = +$('cfgPitch').value;
     cfg.sleepMin = clamp(+$('cfgSleep').value || 4, 1, 120); cfg.nosy = $('cfgNosy').checked; cfg.spont = $('cfgSpont').checked;
-    cfg.caption = $('cfgCaption').checked; cfg.ear = $('cfgEar').value; cfg.groqKey = $('cfgGroq').value.trim(); cfg.filler = $('cfgFiller').checked; cfg.meter = $('cfgMeter').checked; cfg.mic = $('cfgMic').value; cfg.fem = $('cfgFem').value === '1'; cfg.swear = $('cfgSwear').value; cfg.politica = $('cfgPolitica').value;
+    cfg.caption = $('cfgCaption').checked; cfg.ear = $('cfgEar').value; cfg.groqKey = $('cfgGroq').value.trim(); cfg.filler = $('cfgFiller').checked; cfg.gain = +$('cfgGain').value || 1; cfg.meter = $('cfgMeter').checked; cfg.mic = $('cfgMic').value; cfg.fem = $('cfgFem').value === '1'; cfg.swear = $('cfgSwear').value; cfg.politica = $('cfgPolitica').value;
   }
   gear.addEventListener('click', (e) => { e.stopPropagation(); openPanel(); });
   $('cfgRate').oninput = (e) => ($('rateVal').textContent = e.target.value);
@@ -877,7 +917,7 @@ Agora: ${hora}.${ctxNote ? '\n' + ctxNote : ''}`;
   if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('sw.js').catch(() => {});
 
   // ganchos pra teste automatizado
-  window.__bit = { setExpr, setState, think, onHeard, goSleep, cfg, vosk, fx, stt, get state() { return state; }, get history() { return history; } };
+  window.__bit = { setExpr, setState, think, onHeard, goSleep, cfg, vosk, fx, stt, resample16k, to16k, normalizePeak, get state() { return state; }, get history() { return history; } };
 
   setState('boot'); setExpr('feliz');
   requestAnimationFrame(frame);
