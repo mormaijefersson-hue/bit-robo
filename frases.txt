@@ -1,0 +1,5 @@
+f1.wav|bom dia tudo bem com você
+f2.wav|quanto custa uma limpeza de ar condicionado
+f3.wav|tive uma ideia de fechar contrato de manutenção preventiva
+f4.wav|que horas são agora
+f5.wav|me conta uma piada
